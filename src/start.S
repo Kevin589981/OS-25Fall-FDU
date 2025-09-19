@@ -56,6 +56,14 @@ _start:
   ldr x2, =kstack
   add x2, x2, x0
   mov sp, x2
+
+  /*使用汇编清空*/
+  /* ldr x0, =bss*/
+  /* mov x1, #0    */        
+  /* ldr x2, =ebss*/
+  /* sub x2, x2, x0*/
+  /* bl  memset*/
+
   ldr x9, =main
   br  x9
 
