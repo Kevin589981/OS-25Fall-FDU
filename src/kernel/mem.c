@@ -196,8 +196,8 @@ void kalloc_pools_init() {
 
 /**
  * 为一个指定的池分配并初始化一个新的专用页
- * @param pool_idx 需要扩容的池的索引
- * @return 成功则返回新页的头部指针，失败（内存不足）返回 NULL
+ * pool_idx 需要扩容的池的索引
+ * 成功则返回新页的头部指针，失败（内存不足）返回 NULL
  */
 static PagePoolHeader* grow_pool(int pool_idx) {
     // 1. 从底层页分配器申请一个干净的物理页
