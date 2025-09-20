@@ -71,8 +71,9 @@ void kinit() {
     // 将存放VMM的该页的引用计数增加
     for (usize i=0; i<page_count;i++){
         // 每一页页表的对应页表行
+        // 32754是一个奇怪的数，发现每次i变成32754就会卡死，原来是逻辑写错导致内存溢出了
         page_info *this_page_info=&page_infos[i];
-        if (i!=32754)this_page_info->page_ref_count.count=0;
+        // if (i!=32754)this_page_info->page_ref_count.count=0;
         if (i<page_infos_pages){
             increment_rc(&this_page_info->page_ref_count);
         }
@@ -82,20 +83,20 @@ void kinit() {
 
     kalloc_pools_init();
 }
-static int times=0;
+// static int times=0;
 void* kalloc_page() {
     acquire_spinlock(&VMM_lock);
     increment_rc(&kalloc_page_cnt);
     // printk("allocate a new page\n");
     
     if (free_page_list==NULL){
-        if (times==0)printk("Great Error. First time failed.\n");
+        // if (times==0)printk("Great Error. First time failed.\n");
         decrement_rc(&kalloc_page_cnt);
         printk("Pages have been used out.\n");
         release_spinlock(&VMM_lock);
         return NULL;
     }
-    times+=1;
+    // times+=1;
     //此时不应当出现free_page_list为空的情况，因为还有空页表
     ListNode *temp_node=free_page_list;
     // 接受返回的前一个节点（可能为空）
@@ -129,10 +130,9 @@ void kfree_page(void* p) {
 }
 
 typedef struct PagePoolHeader {
-    // 指向池中下一个页的指针，形成一个简单的单向链表
-    // 如果这是链表中最后一个页，则为 NULL
+    // 指向池中下一个和上一个非满页的指针，形成双向链表
     struct PagePoolHeader* next_page;
-
+    struct PagePoolHeader* prev_page;
     // 保护该页内部状态锁
     SpinLock lock;
     
@@ -275,6 +275,7 @@ void* kalloc(usize size) {
             return NULL;
         }
         // 将新页加入到池的链表头部
+        page_header->prev_page=NULL;
         page_header->next_page = pool->pages;
         pool->pages = page_header;
     }
@@ -291,6 +292,17 @@ void* kalloc(usize size) {
     page_header->free_list_offset = block->next_offset;
     page_header->free_count--;
     
+    if (page_header->free_count == 0) {
+        if (page_header->prev_page != NULL) {
+            page_header->prev_page->next_page = page_header->next_page;
+        } else { // 是头节点
+            pool->pages = page_header->next_page;
+        }
+        if (page_header->next_page != NULL) {
+            page_header->next_page->prev_page = page_header->prev_page;
+        }
+    }
+
     release_spinlock(&page_header->lock);
     release_spinlock(&pool->global_lock);
 
@@ -319,59 +331,50 @@ void kfree(void* ptr) {
     }
     PoolManager* pool = &pools[pool_idx];
     
+    acquire_spinlock(&pool->global_lock);
     acquire_spinlock(&page_header->lock);
 
-    // 将释放的块以“头插法”插回到页的空闲链表中
+    // 检查此页在释放前是否已满
+    bool was_full = (page_header->free_count == 0);
+
+    // 将释放的块插回到页的空闲链表中
     FreeBlock* block_to_free = (FreeBlock*)ptr;
     block_to_free->next_offset = page_header->free_list_offset;
     page_header->free_list_offset = (short)((char*)ptr - (char*)page_header);
     page_header->free_count++;
     
-    bool should_free_page = (page_header->free_count == page_header->storage);
-    
-    release_spinlock(&page_header->lock);
-
-    // 如果页面可能已满，则尝试获取全局锁并移除它
-    if (should_free_page) {
-        acquire_spinlock(&pool->global_lock);
-        
-        // 重新获取页锁，进行检查
-        acquire_spinlock(&page_header->lock);
-
-        // 可能在我们释放页锁和获取全局锁的间隙，
-        // 另一个线程从这个页分配了内存
-        if (page_header->free_count == page_header->storage) {
-            // 该页仍然是空的，可以安全移除
-            
-            // 从池的单向链表中移除此页
-            PagePoolHeader* current = pool->pages;
-            PagePoolHeader* prev = NULL;
-            while (current != NULL && current != page_header) {
-                prev = current;
-                current = current->next_page;
+    // 如果页面完全空闲，则释放回系统
+    if (page_header->free_count == page_header->storage) {
+        // 如果页之前不是满的，它一定在非满页链表中，需要先移除
+        if (!was_full) {
+             if (page_header->prev_page != NULL) {
+                page_header->prev_page->next_page = page_header->next_page;
+            } else { // 是头节点
+                pool->pages = page_header->next_page;
             }
-
-            if (current != NULL) { // 找到了
-                if (prev == NULL) { // 是头节点
-                    pool->pages = current->next_page;
-                } else {
-                    prev->next_page = current->next_page;
-                }
-
-                // 释放锁之后再执行耗时操作
-                release_spinlock(&page_header->lock);
-                release_spinlock(&pool->global_lock);
-        
-                // 最终，释放物理页
-                kfree_page(page_header);
-                
-                return; // 提前返回
+            if (page_header->next_page != NULL) {
+                page_header->next_page->prev_page = page_header->prev_page;
             }
         }
-        
-        // 如果页不再是空的，或者在链表中没有找到（理论上不应该），
-        // 那么就什么都不做，只需释放锁。
+        // 注意：如果页之前是满的(was_full)，它不在任何链表中，无需移除
+
         release_spinlock(&page_header->lock);
         release_spinlock(&pool->global_lock);
+        
+        kfree_page(page_header);
+        return;
     }
+    
+    // 如果此页之前是满的，现在有了一个空位，需要将它加回到非满页链表中
+    if (was_full) {
+        page_header->next_page = pool->pages;
+        page_header->prev_page = NULL;
+        if (pool->pages != NULL) {
+            pool->pages->prev_page = page_header;
+        }
+        pool->pages = page_header;
+    }
+    
+    release_spinlock(&page_header->lock);
+    release_spinlock(&pool->global_lock);
 }
