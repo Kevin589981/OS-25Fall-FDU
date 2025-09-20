@@ -240,9 +240,7 @@ static PagePoolHeader* grow_pool(int pool_idx) {
 }
 
 /**
- * 分配一块指定大小的内存
- * @param size 用户请求的内存大小
- * @return 成功则返回指向用户数据区的指针，失败则返回NULL
+ * 成功则返回指向用户数据区的指针，失败则返回NULL
  */
 void* kalloc(usize size) {
     if (size == 0 || size > (1 << POOL_MAX_LOG)) {
@@ -251,7 +249,7 @@ void* kalloc(usize size) {
         return NULL; 
     }
 
-    // 1. 根据请求大小，选择最合适的内存池
+    // 根据请求大小，选择最合适的内存池
     int pool_idx = 0;
     usize pool_obj_size = 1 << POOL_MIN_LOG;
     while (pool_obj_size < size) {
@@ -262,13 +260,13 @@ void* kalloc(usize size) {
 
     acquire_spinlock(&pool->global_lock);
 
-    // 2. 遍历页面链表，查找有空闲块的页面
+    // 遍历页面链表，查找有空闲块的页
     PagePoolHeader* page_header = pool->pages;
     while (page_header != NULL && page_header->free_count == 0) {
         page_header = page_header->next_page;
     }
 
-    // 3. 如果没有找到可用页面，则创建一个新页面
+    // 如果没有找到可用页面，则创建一个新页
     if (page_header == NULL) {
         page_header = grow_pool(pool_idx);
         if (page_header == NULL) {
@@ -281,7 +279,7 @@ void* kalloc(usize size) {
         pool->pages = page_header;
     }
 
-    // 4. 从找到的页面中分配一个块
+    // 从找到的页面中分配一个块
     acquire_spinlock(&page_header->lock);
 
     // 取出空闲链表的第一个块
@@ -300,16 +298,15 @@ void* kalloc(usize size) {
 }
 
 /**
- * 释放由kalloc分配的内存块
- * @param ptr 指向由kalloc返回的数据区的指针
+ * 释放由kalloc分配的内存块，ptr指向由kalloc返回的数据区的指针
  */
 void kfree(void* ptr) {
     if (ptr == NULL) return;
 
-    // 1. 根据用户指针，通过地址对齐反向计算出页头的地址
+    // 根据用户指针，通过地址对齐反向计算出页头的地址
     PagePoolHeader* page_header = (PagePoolHeader*)((usize)ptr & ~(PAGE_SIZE - 1));
 
-    // 2. 从页头中获取对象大小，并找到对应的内存池
+    // 从页头中获取对象大小，并找到对应的内存池
     int pool_idx = 0;
     usize pool_obj_size = 1 << POOL_MIN_LOG;
     while ((short)pool_obj_size < page_header->obj_size) {
@@ -324,7 +321,7 @@ void kfree(void* ptr) {
     
     acquire_spinlock(&page_header->lock);
 
-    // 3. 将释放的块以“头插法”插回到页的空闲链表中
+    // 将释放的块以“头插法”插回到页的空闲链表中
     FreeBlock* block_to_free = (FreeBlock*)ptr;
     block_to_free->next_offset = page_header->free_list_offset;
     page_header->free_list_offset = (short)((char*)ptr - (char*)page_header);
@@ -334,17 +331,17 @@ void kfree(void* ptr) {
     
     release_spinlock(&page_header->lock);
 
-    // 4. 如果页面可能已满，则尝试获取全局锁并移除它
+    // 如果页面可能已满，则尝试获取全局锁并移除它
     if (should_free_page) {
         acquire_spinlock(&pool->global_lock);
         
-        // 重新获取页锁，准备进行最终检查
+        // 重新获取页锁，进行检查
         acquire_spinlock(&page_header->lock);
 
-        // 再次检查！可能在我们释放页锁和获取全局锁的间隙，
-        // 另一个线程从这个页面分配了内存。
+        // 可能在我们释放页锁和获取全局锁的间隙，
+        // 另一个线程从这个页分配了内存
         if (page_header->free_count == page_header->storage) {
-            // 确认该页仍然是空的，现在可以安全地移除了
+            // 该页仍然是空的，可以安全移除
             
             // 从池的单向链表中移除此页
             PagePoolHeader* current = pool->pages;
