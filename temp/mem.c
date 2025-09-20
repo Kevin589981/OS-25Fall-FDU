@@ -9,53 +9,9 @@
 
 RefCount kalloc_page_cnt;
 
-// 前向声明 PagePoolHeader 结构体，以便在 page_info 中使用
-struct PagePoolHeader;
-
-/**
- * 覆盖在空闲内存块上的视图
- * 当一个内存块是空闲状态时，它的起始位置为这个结构体，
- * 用它来存储指向下一个空闲块的偏移量
- * 大小必须小于等于它所在池的最小对象大小（即2字节），故采用short
- */
-typedef struct FreeBlock {
-    // 下一个空闲块的偏移量
-    short next_offset;
-} FreeBlock;
-
-
-// 将 PagePoolHeader 的定义移到 page_info 之前
-typedef struct PagePoolHeader {
-    // 指向池中下一个和上一个非满页的指针，形成双向链表
-    struct PagePoolHeader* next_page;
-    struct PagePoolHeader* prev_page;
-    // 保护该页内部状态锁
-    SpinLock lock;
-    
-    // 该页管理的对象大小（例如 2, 4, 8, ..., 2048）
-    // 该字段在 kfree 时用于反向查找该页属于哪个池
-    short obj_size;
-
-    // 该页最多可以容纳的小块的总数量
-    // 在页面初始化后，这个值是固定不变的
-    short storage;
-
-    // 该页当前剩余的空闲小块数量。
-    // 当 free_count == storage 时，该页完全空闲，可以被释放。
-    short free_count;
-
-    // 指向页内第一个空闲块的偏移量（相对于页起始地址）。
-    // 值为 0 表示该页已满，没有空闲块了。
-    short free_list_offset;
-
-} PagePoolHeader;
-
-// 在 page_info 中加入 PagePoolHeader
 typedef struct page_info{
     SpinLock page_lock;
     RefCount page_ref_count;
-    // 将页池头部信息整合到页信息表中
-    PagePoolHeader pool_header;
 }page_info;
 
 // 空闲页链表
@@ -123,7 +79,7 @@ void kinit() {
         }
         // printk("Record Page %llu\n", i);
     }
-    // printk("allocate %llu pages\n",page_infos_pages);
+    printk("allocate %llu pages\n",page_infos_pages);
 
     kalloc_pools_init();
 }
@@ -173,6 +129,44 @@ void kfree_page(void* p) {
     return;
 }
 
+typedef struct PagePoolHeader {
+    // 指向池中下一个和上一个非满页的指针，形成双向链表
+    struct PagePoolHeader* next_page;
+    struct PagePoolHeader* prev_page;
+    // 保护该页内部状态锁
+    SpinLock lock;
+    
+    // 该页管理的对象大小（例如 2, 4, 8, ..., 2048）
+    // 该字段在 kfree 时用于反向查找该页属于哪个池
+    short obj_size;
+
+    // 该页最多可以容纳的小块的总数量
+    // 在页面初始化后，这个值是固定不变的
+    short storage;
+
+    // 该页当前剩余的空闲小块数量。
+    // 当 free_count == storage 时，该页完全空闲，可以被释放。
+    // 和页表中的引用计数器其实是一样的
+    short free_count;
+
+    // 指向页内第一个空闲块的偏移量（相对于页起始地址）。
+    // 值为 0 表示该页已满，没有空闲块了。
+    short free_list_offset;
+
+} PagePoolHeader;
+
+/**
+ * 覆盖在空闲内存块上的视图
+ * 当一个内存块是空闲状态时，它的起始位置为这个结构体，
+ * 用它来存储指向下一个空闲块的偏移量
+ * 大小必须小于等于它所在池的最小对象大小（即2字节），故采用short
+ */
+typedef struct FreeBlock {
+    // 下一个空闲块的偏移量
+    short next_offset;
+} FreeBlock;
+
+
 // 内存池管理器，管理特定大小内存块
 
 typedef struct PoolManager {
@@ -212,19 +206,17 @@ static PagePoolHeader* grow_pool(int pool_idx) {
         return NULL;
     }
 
-    // 2. 计算页号，并从 page_infos 数组中获取对应的页头指针
-    usize page_idx = ((usize)page_addr - (usize)page_infos) / PAGE_SIZE;
-    PagePoolHeader* header = &page_infos[page_idx].pool_header;
-
-    // 3. 在页信息中初始化页池头
-    init_spinlock(&header->lock);
+    // 2. 在页的起始位置建立 PagePoolHeader
+    PagePoolHeader* header = (PagePoolHeader*)page_addr;
     header->obj_size = 1 << (pool_idx + POOL_MIN_LOG);
+    init_spinlock(&header->lock);
+
+    // 3. 将页的剩余空间切割成N个小块，并构建侵入式空闲链表
     header->storage = 0;
     header->free_count = 0;
     
-    // 4. 将页的整个空间切割成N个小块，并构建侵入式空闲链表
-    // 由于页头已移走，第一个块可以从页的起始位置开始
-    short current_offset = 0;
+    // 计算第一个块的对齐后偏移量
+    short current_offset = (sizeof(PagePoolHeader) + header->obj_size - 1) & ~(header->obj_size - 1);
     header->free_list_offset = current_offset;
 
     // 遍历所有可能的块，将它们链接起来
@@ -244,7 +236,6 @@ static PagePoolHeader* grow_pool(int pool_idx) {
     }
     header->free_count = header->storage;
 
-    // 返回指向 page_info 中页头的指针
     return header;
 }
 
@@ -286,27 +277,15 @@ void* kalloc(usize size) {
         // 将新页加入到池的链表头部
         page_header->prev_page=NULL;
         page_header->next_page = pool->pages;
-        if (pool->pages != NULL) {
-            pool->pages->prev_page = page_header;
-        }
         pool->pages = page_header;
     }
 
     // 从找到的页面中分配一个块
     acquire_spinlock(&page_header->lock);
 
-    // 页头在 page_infos 中，需要通过它反向计算出实际物理页的地址
-    page_info *p_info_base = 0;
-    // 使用指针运算计算 pool_header 成员在 page_info 结构体内的偏移量
-    usize offset_of_header = (usize)((char*)&(p_info_base->pool_header) - (char*)p_info_base);
-    page_info *info = (page_info*)((char*)page_header - offset_of_header);
-    usize page_idx = info - page_infos;
-    void* page_addr = (void*)((char*)page_infos + page_idx * PAGE_SIZE);
-
-
     // 取出空闲链表的第一个块
     short offset = page_header->free_list_offset;
-    void* ptr = (void*)((char*)page_addr + offset);
+    void* ptr = (void*)((char*)page_header + offset);
     FreeBlock* block = (FreeBlock*)ptr;
 
     // 更新空闲链表头
@@ -336,23 +315,21 @@ void* kalloc(usize size) {
 void kfree(void* ptr) {
     if (ptr == NULL) return;
 
-    // 新逻辑：根据用户指针，计算出页地址，再计算出页号，最终从 page_infos 中找到页头
-    void* page_addr = (void*)((usize)ptr & ~(PAGE_SIZE - 1));
-    usize page_idx = ((usize)page_addr - (usize)page_infos) / PAGE_SIZE;
-    PagePoolHeader* page_header = &page_infos[page_idx].pool_header;
+    // 根据用户指针，通过地址对齐反向计算出页头的地址
+    PagePoolHeader* page_header = (PagePoolHeader*)((usize)ptr & ~(PAGE_SIZE - 1));
 
     // 从页头中获取对象大小，并找到对应的内存池
-    int pool_idx_check = 0;
+    int pool_idx = 0;
     usize pool_obj_size = 1 << POOL_MIN_LOG;
     while ((short)pool_obj_size < page_header->obj_size) {
         pool_obj_size <<= 1;
-        pool_idx_check++;
+        pool_idx++;
     }
     if ((short)pool_obj_size != page_header->obj_size) {
         printk("kfree: Memory corruption detected! Pointer points to an invalid page header.\n");
         return;
     }
-    PoolManager* pool = &pools[pool_idx_check];
+    PoolManager* pool = &pools[pool_idx];
     
     acquire_spinlock(&pool->global_lock);
     acquire_spinlock(&page_header->lock);
@@ -363,8 +340,7 @@ void kfree(void* ptr) {
     // 将释放的块插回到页的空闲链表中
     FreeBlock* block_to_free = (FreeBlock*)ptr;
     block_to_free->next_offset = page_header->free_list_offset;
-    // 偏移量现在是相对于页的起始地址计算的
-    page_header->free_list_offset = (short)((char*)ptr - (char*)page_addr);
+    page_header->free_list_offset = (short)((char*)ptr - (char*)page_header);
     page_header->free_count++;
     
     // 如果页面完全空闲，则释放回系统
@@ -385,8 +361,7 @@ void kfree(void* ptr) {
         release_spinlock(&page_header->lock);
         release_spinlock(&pool->global_lock);
         
-        // 释放的是物理页地址，而不是页头指针
-        kfree_page(page_addr);
+        kfree_page(page_header);
         return;
     }
     
