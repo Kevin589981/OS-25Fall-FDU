@@ -287,44 +287,55 @@ void* kalloc(usize size) {
     }
 
     PoolManager* pool = &g_pools[pool_idx].manager;
-    // usize pool_obj_size = g_pools[pool_idx].obj_size;
+    PagePoolHeader* page_header = NULL;
 
-
+    // 1. 短暂加锁，查找并摘除一个可用页
     acquire_spinlock(&pool->global_lock);
-
-    // 遍历页面链表，查找有空闲块的页
-    PagePoolHeader* page_header = pool->pages;
-    while (page_header != NULL && page_header->free_count == 0) {
+    bool tag = false;
+    page_header = pool->pages;
+    while (page_header != NULL) {
+        tag=try_acquire_spinlock(&page_header->lock);
+        if (tag){
+            break;
+        }
         page_header = page_header->next_page;
     }
 
-    // 如果没有找到可用页面，则创建一个新页
+    if (page_header != NULL) {
+        // 找到了，立即从链表中摘除
+        if (page_header->prev_page != NULL) {
+            page_header->prev_page->next_page = page_header->next_page;
+        } else {
+            pool->pages = page_header->next_page;
+        }
+        if (page_header->next_page != NULL) {
+            page_header->next_page->prev_page = page_header->prev_page;
+        }
+        page_header->next_page = page_header->prev_page = NULL;
+    }
+    
+    // 2. 立即释放全局锁
+    release_spinlock(&pool->global_lock);
+
+    // 3. 如果链表中没有可用页，则创建一个新页 (慢路径)
     if (page_header == NULL) {
         page_header = grow_pool(pool_idx);
         if (page_header == NULL) {
-            release_spinlock(&pool->global_lock);
             return NULL;
         }
-        // 将新页加入到池的链表头部
-        page_header->prev_page=NULL;
-        page_header->next_page = pool->pages;
-        if (pool->pages != NULL) {
-            pool->pages->prev_page = page_header;
-        }
-        pool->pages = page_header;
     }
 
-    // 从找到的页面中分配一个块
-    acquire_spinlock(&page_header->lock);
+    // 4. 在页级别上操作
+    if (!tag) acquire_spinlock(&page_header->lock);
 
-    // 在编译时计算出pool_header这个成员变量在一个page_info结构体中的偏移量
+    // 计算页地址等信息
     page_info *p_info_base = 0;
     usize offset_of_header = (usize)((char*)&(p_info_base->pool_header) - (char*)p_info_base);
     page_info *info = (page_info*)((char*)page_header - offset_of_header);
     usize page_info_idx = info - page_infos;
     void* page_addr = (void*)((char*)page_infos + page_info_idx * PAGE_SIZE);
 
-    // 取出空闲链表的第一个块
+    // 从页内分配一个块
     short offset = page_header->free_list_offset;
     void* ptr = (void*)((char*)page_addr + offset);
     FreeBlock* block = (FreeBlock*)ptr;
@@ -333,19 +344,28 @@ void* kalloc(usize size) {
     page_header->free_list_offset = block->next_offset;
     page_header->free_count--;
     
-    if (page_header->free_count == 0) {
-        if (page_header->prev_page != NULL) {
-            page_header->prev_page->next_page = page_header->next_page;
-        } else { // 是头节点
-            pool->pages = page_header->next_page;
-        }
-        if (page_header->next_page != NULL) {
-            page_header->next_page->prev_page = page_header->prev_page;
-        }
-    }
+    // 检查此页在分配后是否已满
+    bool page_still_has_space = (page_header->free_count > 0);
 
+    // 为了遵守锁顺序，必须先释放低级锁，才能去获取高级锁
     release_spinlock(&page_header->lock);
-    release_spinlock(&pool->global_lock);
+
+    // 6. 如果页未满，则将其重新加入全局链表
+    if (page_still_has_space) {
+
+        acquire_spinlock(&pool->global_lock);
+        
+        // 将其插回链表头部
+        page_header->next_page = pool->pages;
+        page_header->prev_page = NULL;
+        if (pool->pages != NULL) {
+            pool->pages->prev_page = page_header;
+        }
+        pool->pages = page_header;
+        
+        release_spinlock(&pool->global_lock);
+    }
+    // 如果页变满了，它就自然地脱离了非满页链表，不必再加进去
 
     return ptr;
 }
