@@ -95,10 +95,19 @@ static PoolInfo g_pools[] = {
     { 32,   { .global_lock = {false}, .pages = NULL } },
     { 40,   { .global_lock = {false}, .pages = NULL } }, // 自定义尺寸
     { 48,   { .global_lock = {false}, .pages = NULL } }, // 自定义尺寸
+    { 56,   { .global_lock = {false}, .pages = NULL } },
     { 64,   { .global_lock = {false}, .pages = NULL } },
+    { 80,   { .global_lock = {false}, .pages = NULL } },
+    { 96,   { .global_lock = {false}, .pages = NULL } },
+    { 112,  { .global_lock = {false}, .pages = NULL } },
     { 128,  { .global_lock = {false}, .pages = NULL } },
+    { 160,  { .global_lock = {false}, .pages = NULL } },
+    { 192,  { .global_lock = {false}, .pages = NULL } },
+    { 224,  { .global_lock = {false}, .pages = NULL } },
     { 256,  { .global_lock = {false}, .pages = NULL } },
+    { 384,  { .global_lock = {false}, .pages = NULL } },
     { 512,  { .global_lock = {false}, .pages = NULL } },
+    { 768,  { .global_lock = {false}, .pages = NULL } },
     { 1024, { .global_lock = {false}, .pages = NULL } },
     { 2048, { .global_lock = {false}, .pages = NULL } },
 };
