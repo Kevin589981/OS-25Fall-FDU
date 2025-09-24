@@ -64,13 +64,15 @@ usize page_count;
 // 空闲物理页数量
 usize free_page_count=0;
 SpinLock VMM_lock={false};
-void *VMM=NULL;//页表使用情况报告表
-// 页表所在位置
-page_info* page_infos=NULL;
+// void *VMM=NULL;//页表使用情况报告表，没有被使用
 
-static usize page_infos_size_bytes = 0; 
-static usize memory_size_byte=0; //内存大小
-static usize page_infos_pages=0;
+// 定义物理内存的起始虚拟地址，用于计算页号索引
+#define VMM_START P2K(EXTMEM)
+// 根据内存布局计算出最大的物理页数量
+#define TOTAL_PHYS_PAGES ((PHYSTOP - EXTMEM) / PAGE_SIZE)
+
+// 将 page_infos 定义为全局定长数组，将被放入.bss段
+page_info page_infos[TOTAL_PHYS_PAGES];
 
 // 内存池管理器，管理特定大小内存块
 typedef struct PoolManager {
@@ -122,50 +124,41 @@ void kinit() {
     init_rc(&kalloc_page_cnt);
     // 先计算开始的位置
     extern char end[];
+
     // 进行物理页对齐
-    usize user_start_link=(usize)(((usize)end + PAGE_SIZE-1) & (~(PAGE_SIZE-1llu)));
+    void *user_start_link=(void*)(((usize)end + PAGE_SIZE-1) & (~(PAGE_SIZE-1llu)));
     usize user_end_link=P2K(PHYSTOP);
-    printk("PHYSTOP is %x\n",PHYSTOP);
-    printk("user_start_link is %llx\n",user_start_link);
-    printk("user_end_link is %llx\n", user_end_link);
+    
+    // printk("PHYSTOP is %x\n",PHYSTOP);
+    // printk("Kernel end symbol is at %p\n", end);
+    // printk("Free memory starts at %p\n", user_start_link);
+    // printk("Physical memory ends at %llu\n", user_end_link);
+    
     // 共有page_count页
-    page_count=((user_end_link-user_start_link)/(PAGE_SIZE));
-    // 物理内存大小
-    memory_size_byte=page_count*PAGE_SIZE;
-    printk("memory size is %llu bytes.\n",memory_size_byte);
-    // !操作系统内存很大，这个表会占用多页，不能先写kalloc_page，用kalloc_page分配导致页数不够
-    
-    page_infos_size_bytes=sizeof(page_info)*page_count;
-    // 页表占用的页数
-    page_infos_pages=(page_infos_size_bytes+PAGE_SIZE-1)/PAGE_SIZE;
-    page_infos= (page_info*) user_start_link;
-    
-    // 从页表开始处清理字节给页表使用
-    memset(page_infos, 0, page_infos_size_bytes);
+    page_count = TOTAL_PHYS_PAGES;
+    usize memory_size_byte = (user_end_link - (usize)user_start_link);
+    printk("Available memory size is %llu bytes.\n", memory_size_byte);
+
+    // page_infos是全局数组，无需动态分配
+    // // !操作系统内存很大，这个表会占用多页，不能先写kalloc_page，用kalloc_page分配导致页数不够
+    memset(page_infos, 0, sizeof(page_infos));
 
     // 操作系统需要占据所有剩余空闲的内存方便托管
     // 不能使用malloc函数（这是用户态的函数）
-    // usize page_addresses[page_count];
-    void *free_page_start=(char*)page_infos+ page_infos_pages*PAGE_SIZE;
     acquire_spinlock(&VMM_lock);
-    for (void *p =free_page_start;p+PAGE_SIZE<=(void *)user_end_link;p+=PAGE_SIZE){
+    for (void *p = user_start_link; p+PAGE_SIZE <= (void *)user_end_link; p+=PAGE_SIZE){
         free_page_list = _insert_into_list(free_page_list, (ListNode *)p);
+        free_page_count++;
     }
     release_spinlock(&VMM_lock);
     
-    // 将存放VMM的该页的引用计数增加
-    for (usize i=0; i<page_count;i++){
-        // 每一页页表的对应页表行
-        // 32754是一个奇怪的数，发现每次i变成32754就会卡死，原来是逻辑写错导致内存溢出了
-        page_info *this_page_info=&page_infos[i];
-        // if (i!=32754)this_page_info->page_ref_count.count=0;
-        if (i<page_infos_pages){
-            increment_rc(&this_page_info->page_ref_count);
-        }
-        // printk("Record Page %llu\n", i);
+    // 标记所有内核代码、数据和BSS段占用的页为已使用
+    // 通过增加它们的引用计数，防止被分配器错误地分配出去
+    usize kernel_used_pages = ((usize)user_start_link - VMM_START) / PAGE_SIZE;
+    for (usize i = 0; i < kernel_used_pages; i++) {
+        increment_rc(&page_infos[i].page_ref_count);
     }
-    // printk("allocate %llu pages\n",page_infos_pages);
-
+    
     kalloc_pools_init();
 }
 // static int times=0;
@@ -233,7 +226,8 @@ static PagePoolHeader* grow_pool(int pool_idx) {
         return NULL;
     }
     // 2. 计算页号，并从 page_infos 数组中获取对应的页头指针
-    usize page_info_idx = ((usize)page_addr - (usize)page_infos) / PAGE_SIZE;
+    // 索引计算基于VMM_START
+    usize page_info_idx = ((usize)page_addr - VMM_START) / PAGE_SIZE;
     PagePoolHeader* header = &page_infos[page_info_idx].pool_header;
 
     // 3. 在页信息中初始化页池头
@@ -332,8 +326,9 @@ void* kalloc(usize size) {
     page_info *p_info_base = 0;
     usize offset_of_header = (usize)((char*)&(p_info_base->pool_header) - (char*)p_info_base);
     page_info *info = (page_info*)((char*)page_header - offset_of_header);
+    // 通过索引反向计算页地址时，基地址为VMM_START
     usize page_info_idx = info - page_infos;
-    void* page_addr = (void*)((char*)page_infos + page_info_idx * PAGE_SIZE);
+    void* page_addr = (void*)(VMM_START + page_info_idx * PAGE_SIZE);
 
     // 从页内分配一个块
     short offset = page_header->free_list_offset;
@@ -378,7 +373,7 @@ void kfree(void* ptr) {
 
     // 根据用户指针，计算出页地址，再计算出页号，最终从 page_infos 中找到页头
     void* page_addr = (void*)((usize)ptr & ~(PAGE_SIZE - 1));
-    usize page_info_idx = ((usize)page_addr - (usize)page_infos) / PAGE_SIZE;
+    usize page_info_idx = ((usize)page_addr - VMM_START) / PAGE_SIZE;
     PagePoolHeader* page_header = &page_infos[page_info_idx].pool_header;
 
     // 从配置信息中获取对象大小，并遍历配置表找到对应的内存池
