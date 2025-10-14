@@ -32,6 +32,19 @@ void trap_global_handler(UserContext *context)
     case ESR_EC_IABORT_EL1:
     case ESR_EC_DABORT_EL0:
     case ESR_EC_DABORT_EL1: {
+        u64 far = arch_get_far();
+        u64 elr = arch_get_elr(); // 发生错误的指令地址
+
+        // 打印详细的调试报告
+        printk("===== KERNEL PANIC: Memory Access Abort =====\n");
+        printk("  - Exception Class (EC): 0x%llx (%s)\n", ec, 
+               (ec == ESR_EC_IABORT_EL0 || ec == ESR_EC_IABORT_EL1) ? "Instruction Abort" : "Data Abort");
+        printk("  - Faulting Virtual Address (FAR): 0x%llx\n", far);
+        printk("  - Faulting Instruction Addr (ELR): 0x%llx\n", elr);
+        printk("  - Exception Syndrome (ESR): 0x%llx\n", esr);
+        printk("  - Current Process PID: %d\n", thisproc()->pid);
+        printk("================================================\n");
+
         printk("Page fault\n");
         PANIC();
     } break;

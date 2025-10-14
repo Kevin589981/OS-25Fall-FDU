@@ -169,7 +169,6 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
 int wait(int *exitcode)
 {
     // TODO:
-    acquire_spinlock(&global_process_lock);
     Proc *parent=thisproc();
     // 1. return -1 if no children
     // acquire_spinlock(&global_process_lock);
@@ -177,7 +176,7 @@ int wait(int *exitcode)
     //     release_spinlock(&global_process_lock);
     //     return -1;
     // }
-    
+    acquire_spinlock(&global_process_lock);
     while (1){
         
         // if (_empty_list(&parent->children)){
@@ -201,14 +200,12 @@ int wait(int *exitcode)
                 zombie_child = p;
                 break;
             }
-            // if (node->next==&parent->children){
-            //     break;
-            // }
         }
         // }
         if (zombie_child){
             if (exitcode!=NULL){
                 *exitcode=zombie_child->exitcode;
+
             }
             int child_pid=zombie_child->pid;
             if (zombie_child->kstack){
@@ -246,11 +243,10 @@ NO_RETURN void exit(int code)
     // 2. clean up the resources
     
     // 3. transfer children to the root_proc, and notify the root_proc if there is zombie
-    // _for_in_list(node,&p->children){
-    //     Proc *child=container_of(node,Proc,ptnode);
-    //     child->parent=&root_proc;
-    // }
-
+    _for_in_list(node,&p->children){
+        Proc *child=container_of(node,Proc,ptnode);
+        child->parent=&root_proc;
+    }
 // #ifdef debug_page_fault
 //     printk("proc's ptnode is %llx, proc's children is %llx\n", (u64)&p->ptnode,(u64)&p->children);
 // #endif

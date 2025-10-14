@@ -1,15 +1,56 @@
 #include <common/list.h>
+#include <kernel/printk.h>
 
 void init_list_node(ListNode *node)
 {
     node->prev = node;
     node->next = node;
 }
-
+#include <kernel/proc.h> 
+extern Proc root_proc;
+// extern void dump_proc_details(Proc *p, const char *label);
+extern Proc *thisproc();
+extern int flag_;
 ListNode *_merge_list(ListNode *node1, ListNode *node2)
-{
+{   
+    // u64 return_addr;
+    // asm volatile("mov %0, lr" : "=r"(return_addr));
+    // if (flag_==1) {
+    //     printk("\n[DEBUG] --- INSIDE _merge_list (TARGETED call detected!) ---\n");
+        
+    //     // 1. 打印函数实际接收到的参数值 (诊断的核心)
+    //     printk("[DEBUG] Received arg1 (node1): 0x%llx <-- COMPARE THIS!\n", (u64)node1);
+        
+    //     // 2. 再次完整转储 root_proc 的详细字段信息
+    //     dump_proc_details(&root_proc, "root_proc state at _merge_list entry");
+    // }
+    // printk("This proc is %d\n",thisproc()->pid);
+    // if (node1&&node1->next==NULL){
+    //     printk("This proc is %d\n",thisproc()->pid);
+    //     printk("list.c:27 node1 is %llx\n", (u64)node1);
+    //     printk("list.c:28 node2 is %llx\n", (u64)node2);
+        // if (((u64)node1 >= (u64)&root_proc && (u64)node1 < (u64)&root_proc + sizeof(Proc)) || 
+        // (u64)node1 == 0xffff000040c972d8) { // 硬编码日志中出现的错误地址
+
+        // ==================== 读取并打印返回地址 ====================
+        
+        // ==========================================================
+
+    //     printk("\n[DEBUG] --- INSIDE _merge_list (SUSPICIOUS call detected!) ---\n");
+        
+    //     // *** 打印我们最关心的信息：调用者的返回地址 ***
+    //     printk("[DEBUG] *** Caller's Return Address (LR): 0x%llx ***\n", return_addr);
+        
+    //     printk("[DEBUG] Received arg1 (node1): 0x%llx\n", (u64)node1);
+        
+    //     // dump_proc_details(&root_proc, "root_proc state at _merge_list entry");
+    // }
+    
     if (!node1)
         return node2;
+    // if (node1->next==NULL){
+    //     printk("list.c:%d\n", 17);
+    // }
     if (!node2)
         return node1;
 
@@ -21,15 +62,17 @@ ListNode *_merge_list(ListNode *node1, ListNode *node2)
     //   ... --> node1 --+  +-> node3 --> ...
     //                   |  |
     //   ... <-- node2 <-+  +-- node4 <-- ...
-
     ListNode *node3 = node1->next;
+    // if (node1->next==NULL)printk("list.c:26\n");
     ListNode *node4 = node2->prev;
 
     node1->next = node2;
     node2->prev = node1;
+    // if (node3==NULL)printk("list.c:30\n");
     node4->next = node3;
+    // if (node4==NULL)printk("list.c:31\n");
     node3->prev = node4;
-
+    // printk("list.c:32");
     return node1;
 }
 

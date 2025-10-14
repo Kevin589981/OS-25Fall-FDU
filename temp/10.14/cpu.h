@@ -20,9 +20,9 @@ struct cpu {
     struct sched sched;
 };
 
-extern ListNode global_run_queue;
-// extern struct rb_root_ global_run_queue;
-extern SpinLock global_sched_lock;
+
+extern struct rb_root_ global_run_queue;
+extern SpinLock global_shed_lock;
 extern struct cpu cpus[NCPU];
 
 void set_cpu_on();

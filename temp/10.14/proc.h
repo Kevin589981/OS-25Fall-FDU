@@ -23,8 +23,7 @@ typedef struct KernelContext {
 struct schinfo {
     // TODO: customize your sched info
     u64 vruntime;
-    // struct rb_node_ node;
-    ListNode node;
+    struct rb_node_ node;
     int nice;
     u64 start_exec_time;
 };

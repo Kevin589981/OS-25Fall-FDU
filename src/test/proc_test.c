@@ -64,7 +64,7 @@ static void proc_test_1a(u64 a)
         for (int i = 0; i < 10; i++) {
             wait(&x);
             t |= 1 << (x - 10);
-        }
+        }     
         ASSERT(t == 1023);
         ASSERT(wait(&x) == -1);
     } break;
