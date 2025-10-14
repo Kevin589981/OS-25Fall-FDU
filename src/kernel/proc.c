@@ -75,14 +75,10 @@ void init_kproc()
     root_proc.parent = &root_proc;
     start_proc(&root_proc, kernel_entry, 123456);
 }
-
+// 在 init_proc 中初始化 schinfo
 void init_proc(Proc *p)
 {
-    // TODO:
-    // setup the Proc with kstack and pid allocated
-    // NOTE: be careful of concurrency
-    
-    memset(p,0,sizeof(Proc));
+    memset(p, 0, sizeof(Proc));
 
     acquire_spinlock(&global_process_lock);
 
@@ -90,25 +86,28 @@ void init_proc(Proc *p)
     init_list_node(&p->children);
     init_list_node(&p->ptnode);
     p->idle = FALSE;
-    p->exitcode=0;
-    p->killed=FALSE;
-    p->pid=pid_allocator();
-    p->state=UNUSED;
-    p->kstack=kalloc_page();
+    p->exitcode = 0;
+    p->killed = FALSE;
+    p->pid = pid_allocator();
+    p->state = UNUSED;
+    p->kstack = kalloc_page();
+    
+    // 初始化调度信息
     init_schinfo(&p->schinfo);
-    if (p->kstack==NULL){
+    
+    if (p->kstack == NULL) {
         release_spinlock(&global_process_lock);
         PANIC();
     }
-    memset(p->kstack,0,PAGE_SIZE);
+    memset(p->kstack, 0, PAGE_SIZE);
 
-    // 这里会覆盖掉的，没必要写
-    p->kcontext=(KernelContext *)((u64)p->kstack+PAGE_SIZE-16-sizeof(KernelContext));
-    p->ucontext=(UserContext *)((u64)p->kstack+PAGE_SIZE-16-sizeof(KernelContext)-sizeof(UserContext));
+    p->kcontext = (KernelContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(KernelContext));
+    p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(KernelContext) - sizeof(UserContext));
 
     release_spinlock(&global_process_lock);
-
 }
+
+// wait 和 exit 函数保持不变
 
 Proc *create_proc()
 {

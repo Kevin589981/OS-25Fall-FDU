@@ -1,5 +1,3 @@
-// sched.c
-
 #include <kernel/sched.h>
 #include <kernel/proc.h>
 #include <kernel/mem.h>
@@ -18,27 +16,43 @@ extern int idle_entry();
 extern Proc idle_procs[];
 
 #define PAGE_SIZE 4096
+#define NICE_0_LOAD 1024
 
-// 保留全局锁用于is_zombie等操作
 SpinLock global_sched_lock;
 
-void create_idle_proc(){
-    for (int i=0;i<NCPU;i++){
-        cpus[i].sched.idle=&idle_procs[i];
-        Proc *p=&idle_procs[i];
-        p->state=RUNNING;
-        p->idle=TRUE;
-        p->pid=-1-i;
-        p->kstack=kalloc_page();
-        p->parent=NULL;
+// 红黑树比较函数：按vruntime排序
+static bool rb_proc_less(struct rb_node_ *lnode, struct rb_node_ *rnode)
+{
+    Proc *lproc = container_of(lnode, Proc, schinfo.node);
+    Proc *rproc = container_of(rnode, Proc, schinfo.node);
+    
+    // vruntime小的在左边
+    if (lproc->schinfo.vruntime < rproc->schinfo.vruntime)
+        return true;
+    if (lproc->schinfo.vruntime > rproc->schinfo.vruntime)
+        return false;
+    // vruntime相同时按pid排序，保证确定性
+    return lproc->pid < rproc->pid;
+}
+
+void create_idle_proc()
+{
+    for (int i = 0; i < NCPU; i++) {
+        cpus[i].sched.idle = &idle_procs[i];
+        Proc *p = &idle_procs[i];
+        p->state = RUNNING;
+        p->idle = TRUE;
+        p->pid = -1 - i;
+        p->kstack = kalloc_page();
+        p->parent = NULL;
         
-        void *sp=(void *)p->kstack+PAGE_SIZE;
-        p->kcontext=(KernelContext *)(sp-sizeof(KernelContext));
-        p->kcontext->lr=(u64)proc_entry;
-        p->kcontext->x0=(u64)idle_entry;
-        p->kcontext->x1=(u64)0;
+        void *sp = (void *)p->kstack + PAGE_SIZE;
+        p->kcontext = (KernelContext *)(sp - sizeof(KernelContext));
+        p->kcontext->lr = (u64)proc_entry;
+        p->kcontext->x0 = (u64)idle_entry;
+        p->kcontext->x1 = (u64)0;
         cpus[i].sched.current_proc = p;
-        cpus[i].sched.idle=p;
+        cpus[i].sched.idle = p;
     }
 }
 
@@ -46,46 +60,46 @@ void init_sched()
 {
     create_idle_proc();
     
-    // 初始化全局锁
     init_spinlock(&global_sched_lock);
     
-    // 初始化每个CPU的调度器
-    for (int i=0;i<NCPU;i++){
+    for (int i = 0; i < NCPU; i++) {
         struct sched *s = &cpus[i].sched;
         init_spinlock(&s->lock);
-        init_list_node(&s->run_queue);
+        // 初始化红黑树
+        s->run_queue.rb_node = NULL;
         s->task_count = 0;
+        s->min_vruntime = 0;
     }
 }
 
 Proc *thisproc()
 {
-    int id=cpuid();
+    int id = cpuid();
     return cpus[id].sched.current_proc;
 }
 
 void init_schinfo(struct schinfo *p)
 {
-    p->vruntime=0;
-    p->nice=0;
-    p->start_exec_time=0;
+    p->vruntime = 0;
+    p->nice = 0;
+    p->start_exec_time = 0;
+    p->node.rb_left = NULL;
+    p->node.rb_right = NULL;
+    p->node.__rb_parent_color = 0;
 }
 
 void acquire_sched_lock()
 {
-    // 获取当前CPU的调度锁
     acquire_spinlock(&cpus[cpuid()].sched.lock);
 }
 
 void release_sched_lock()
 {
-    // 释放当前CPU的调度锁
     release_spinlock(&cpus[cpuid()].sched.lock);
 }
 
 bool is_zombie(Proc *p)
 {
-    // 使用全局锁保护状态读取
     bool r;
     acquire_spinlock(&global_sched_lock);
     r = p->state == ZOMBIE;
@@ -95,12 +109,12 @@ bool is_zombie(Proc *p)
 
 bool activate_proc(Proc *p)
 {
-    if (p->state==RUNNING||p->state==RUNNABLE){
+    if (p->state == RUNNING || p->state == RUNNABLE) {
         return true;
     }
     
-    if (p->state==SLEEPING||p->state==UNUSED){
-        // 选择任务数最少的CPU队列
+    if (p->state == SLEEPING || p->state == UNUSED) {
+        // 选择任务数最少的CPU
         int target_cpu = 0;
         u64 min_count = cpus[0].sched.task_count;
         
@@ -111,13 +125,17 @@ bool activate_proc(Proc *p)
             }
         }
         
-        // 将进程加入目标CPU的队列
         acquire_spinlock(&cpus[target_cpu].sched.lock);
-        p->state = RUNNABLE;
-        _insert_into_list(cpus[target_cpu].sched.run_queue.prev, &p->schinfo.node);
-        cpus[target_cpu].sched.task_count++;
-        release_spinlock(&cpus[target_cpu].sched.lock);
         
+        // 新进程的vruntime设置为当前最小vruntime，避免饥饿
+        p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime;
+        p->state = RUNNABLE;
+        
+        // 插入红黑树
+        _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
+        cpus[target_cpu].sched.task_count++;
+        
+        release_spinlock(&cpus[target_cpu].sched.lock);
         return true;
     }
     
@@ -125,26 +143,57 @@ bool activate_proc(Proc *p)
     return false;
 }
 
+// 更新当前进程的vruntime
+static void update_vruntime(Proc *p, u64 current_time)
+{
+    if (p->idle) return;
+    
+    if (p->schinfo.start_exec_time == 0) {
+        p->schinfo.start_exec_time = current_time;
+        return;
+    }
+    
+    u64 delta_exec = current_time - p->schinfo.start_exec_time;
+    if (delta_exec > 0) {
+        // vruntime增量 = 实际运行时间 * NICE_0_LOAD / weight
+        int weight = WEIGHT(p->schinfo.nice);
+        u64 delta_vruntime = (delta_exec * NICE_0_LOAD) / weight;
+        p->schinfo.vruntime += delta_vruntime;
+    }
+    
+    p->schinfo.start_exec_time = current_time;
+}
+
 static void update_this_state(enum procstate new_state)
 {
     Proc *this = thisproc();
-    if (this->idle){
+    if (this->idle) {
         return;
     }
     
     int my_cpu = cpuid();
+    u64 current_time = get_timestamp(); // 需要实现获取时间戳的函数
+    
+    // 更新vruntime
+    update_vruntime(this, current_time);
+    
+    // 更新min_vruntime
+    if (this->schinfo.vruntime > cpus[my_cpu].sched.min_vruntime) {
+        cpus[my_cpu].sched.min_vruntime = this->schinfo.vruntime;
+    }
+    
     this->state = new_state;
     
-    if (new_state == RUNNABLE || new_state == RUNNING){
-        // 将当前进程放回当前CPU的队列
-        _merge_list(cpus[my_cpu].sched.run_queue.prev, &this->schinfo.node);
-    } else if (new_state == SLEEPING || new_state == ZOMBIE){
-        // 从队列中移除
-        _detach_from_list(&this->schinfo.node);
+    if (new_state == RUNNABLE) {
+        // RUNNING -> RUNNABLE: 插入红黑树
+        _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
+    } else if (new_state == SLEEPING || new_state == ZOMBIE) {
+        // 从RUNNING变为SLEEPING/ZOMBIE，不需要操作红黑树（因为本来就不在树中）
         if (new_state == ZOMBIE) {
             cpus[my_cpu].sched.task_count--;
         }
     }
+    // RUNNING状态的进程不在红黑树中
 }
 
 static Proc *pick_next()
@@ -152,57 +201,50 @@ static Proc *pick_next()
     if (panic_flag) return cpus[cpuid()].sched.idle;
     
     int my_cpu = cpuid();
-    ListNode *my_queue = &cpus[my_cpu].sched.run_queue;
+    struct rb_root_ *my_queue = &cpus[my_cpu].sched.run_queue;
     Proc *next_proc = NULL;
     
-    // 首先从当前CPU的队列中查找
-    _for_in_list(node, my_queue){
-        if (node == my_queue) continue;
-        
-        Proc *p = container_of(node, Proc, schinfo.node);
-        if (p->state == RUNNABLE){
-            next_proc = p;
-            _detach_from_list(node);
-            cpus[my_cpu].sched.task_count--;
-            return next_proc;
-        }
+    // 从红黑树中选择最左节点（vruntime最小）
+    struct rb_node_ *leftmost = _rb_first(my_queue);
+    
+    if (leftmost) {
+        next_proc = container_of(leftmost, Proc, schinfo.node);
+        _rb_erase(leftmost, my_queue);
+        cpus[my_cpu].sched.task_count--;
+        return next_proc;
     }
     
     // 当前队列为空，尝试工作窃取
-    // 先释放当前CPU的锁，避免死锁
     release_spinlock(&cpus[my_cpu].sched.lock);
     
     for (int i = 0; i < NCPU; i++) {
         if (i == my_cpu) continue;
         
-        // 尝试从其他CPU窃取任务
         acquire_spinlock(&cpus[i].sched.lock);
         
-        ListNode *other_queue = &cpus[i].sched.run_queue;
-        Proc *stolen = NULL;
+        struct rb_root_ *other_queue = &cpus[i].sched.run_queue;
+        struct rb_node_ *leftmost_other = _rb_first(other_queue);
         
-        _for_in_list(node, other_queue){
-            if (node == other_queue) continue;
+        if (leftmost_other) {
+            Proc *stolen = container_of(leftmost_other, Proc, schinfo.node);
+            _rb_erase(leftmost_other, other_queue);
+            cpus[i].sched.task_count--;
             
-            Proc *p = container_of(node, Proc, schinfo.node);
-            if (p->state == RUNNABLE){
-                stolen = p;
-                _detach_from_list(node);
-                cpus[i].sched.task_count--;
-                break;
+            release_spinlock(&cpus[i].sched.lock);
+            acquire_spinlock(&cpus[my_cpu].sched.lock);
+            
+            // 调整被窃取进程的vruntime
+            if (stolen->schinfo.vruntime < cpus[my_cpu].sched.min_vruntime) {
+                stolen->schinfo.vruntime = cpus[my_cpu].sched.min_vruntime;
             }
+            
+            return stolen;
         }
         
         release_spinlock(&cpus[i].sched.lock);
-        
-        if (stolen) {
-            // 窃取成功，重新获取当前CPU的锁后返回
-            acquire_spinlock(&cpus[my_cpu].sched.lock);
-            return stolen;
-        }
     }
     
-    // 没有找到任何可运行的进程，重新获取当前CPU的锁，返回idle进程
+    // 没有找到任何可运行的进程
     acquire_spinlock(&cpus[my_cpu].sched.lock);
     return cpus[my_cpu].sched.idle;
 }
@@ -216,7 +258,8 @@ void sched(enum procstate new_state)
 {
     auto this = thisproc();
 #ifdef debug_sched
-    printk("this cpu is %lld, process's pid is %d, state is %d\n",cpuid(), this->pid, this->state);
+    printk("this cpu is %lld, process's pid is %d, state is %d\n", 
+           cpuid(), this->pid, this->state);
 #endif
     ASSERT(this->state == RUNNING);
     
@@ -224,12 +267,14 @@ void sched(enum procstate new_state)
     auto next = pick_next();
     update_this_proc(next);
     
-    if (next->state != RUNNABLE && !next->idle){
-        printk("This proc is: %d, it is %d\n",this->pid,this->state);
-        printk("Next proc is: %d, it is %d\n",next->pid,next->state);
+    if (next->state != RUNNABLE && !next->idle) {
+        printk("This proc is: %d, it is %d\n", this->pid, this->state);
+        printk("Next proc is: %d, it is %d\n", next->pid, next->state);
     }
     ASSERT(next->state == RUNNABLE || next->idle);
+    
     next->state = RUNNING;
+    next->schinfo.start_exec_time = get_timestamp();
     
     if (next != this) {
         auto old_ctx = &this->kcontext;
@@ -244,3 +289,4 @@ u64 proc_entry(void (*entry)(u64), u64 arg)
     set_return_addr(entry);
     return arg;
 }
+

@@ -7,11 +7,11 @@
 #define NCPU 4
 
 struct sched {
-    // 每个CPU的运行队列和锁
-    ListNode run_queue;
+    struct rb_root_ run_queue;  // 红黑树存储RUNNABLE进程
     SpinLock lock;
     u64 task_count;
-    struct Proc* current_proc;
+    u64 min_vruntime;          // 跟踪最小vruntime
+    struct Proc* current_proc; // 当前RUNNING进程
     struct Proc* idle;
 };
 
@@ -21,7 +21,7 @@ struct cpu {
     struct sched sched;
 };
 
-extern SpinLock global_sched_lock;  // 保留用于is_zombie等全局操作
+extern SpinLock global_sched_lock;
 extern struct cpu cpus[NCPU];
 
 void set_cpu_on();
