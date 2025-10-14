@@ -2,14 +2,15 @@
 
 #include <kernel/proc.h>
 #include <common/rbtree.h>
+#include <common/list.h>
 
 #define NCPU 4
 
 struct sched {
-    // TODO: customize your sched info
-    // struct rb_root_ run_queue;//为每个CPU维护一个调度的红黑树
-    // SpinLock lock;
-    u64 task_count; //队列中的任务数量
+    // 每个CPU的运行队列和锁
+    ListNode run_queue;
+    SpinLock lock;
+    u64 task_count;
     struct Proc* current_proc;
     struct Proc* idle;
 };
@@ -20,9 +21,7 @@ struct cpu {
     struct sched sched;
 };
 
-extern ListNode global_run_queue;
-// extern struct rb_root_ global_run_queue;
-extern SpinLock global_sched_lock;
+extern SpinLock global_sched_lock;  // 保留用于is_zombie等全局操作
 extern struct cpu cpus[NCPU];
 
 void set_cpu_on();

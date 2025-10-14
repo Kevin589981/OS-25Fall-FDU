@@ -10,19 +10,18 @@
 #include <kernel/debug.h>
 #include <common/string.h>
 #include <common/list.h>
-extern bool panic_flag;
 
+extern bool panic_flag;
 extern void swtch(KernelContext *new_ctx, KernelContext **old_ctx);
 u64 proc_entry(void (*entry)(u64), u64 arg);
 extern int idle_entry();
-#define PAGE_SIZE 4096
-// --- 定义全局调度资源 ---
-// struct rb_root_ global_run_queue;
-ListNode global_run_queue;
-SpinLock global_sched_lock;
-// u64 global_min_vruntime = 0; 
-// --------------------
 extern Proc idle_procs[];
+
+#define PAGE_SIZE 4096
+
+// 保留全局锁用于is_zombie等操作
+SpinLock global_sched_lock;
+
 void create_idle_proc(){
     for (int i=0;i<NCPU;i++){
         cpus[i].sched.idle=&idle_procs[i];
@@ -30,17 +29,11 @@ void create_idle_proc(){
         p->state=RUNNING;
         p->idle=TRUE;
         p->pid=-1-i;
-        // p->kstack=(void *)idle_stacks[i];
         p->kstack=kalloc_page();
         p->parent=NULL;
-        // init_list_node(&p->children);
-        // init_list_node(&p->ptnode);
-        // schinfo不会用到，不必初始化
-        //当前位于栈底
+        
         void *sp=(void *)p->kstack+PAGE_SIZE;
-        // p->ucontext=NULL;
         p->kcontext=(KernelContext *)(sp-sizeof(KernelContext));
-        // memset(p->kcontext,0,sizeof(KernelContext));
         p->kcontext->lr=(u64)proc_entry;
         p->kcontext->x0=(u64)idle_entry;
         p->kcontext->x1=(u64)0;
@@ -48,259 +41,201 @@ void create_idle_proc(){
         cpus[i].sched.idle=p;
     }
 }
-// void update_vruntime(Proc *p){
-//     if (p==NULL||p->idle==TRUE){
-//         return;
-//     }
-//     u64 now=get_timestamp();
-//     u64 delta_exec=now-p->schinfo.start_exec_time;
-//     // 应该不会为负数
-//     int weight=WEIGHT(p->schinfo.nice);
-//     u64 delta_vruntime=(delta_exec*WEIGHT(0))/weight;
-//     p->schinfo.vruntime+=delta_vruntime;
-// }
-
-// bool compare_runtime(rb_node lnode, rb_node rnode){
-//     // 先找到这个红黑树节点所在的进程
-//     Proc *p1=container_of(lnode,Proc,schinfo.node);
-//     Proc *p2=container_of(rnode,Proc,schinfo.node);
-//     return p1->schinfo.vruntime<p2->schinfo.vruntime;
-// }
 
 void init_sched()
 {
-    // TODO: initialize the scheduler
-    // 1. initialize the resources (e.g. locks, semaphores)
-    // --- 初始化全局资源 ---
     create_idle_proc();
+    
+    // 初始化全局锁
     init_spinlock(&global_sched_lock);
-    // global_run_queue.rb_node = NULL;
-    // -------------------
-    init_list_node(&global_run_queue);
-
-    // 2. initialize the scheduler info of each CPU
+    
+    // 初始化每个CPU的调度器
     for (int i=0;i<NCPU;i++){
-        struct sched *temp=&cpus[i].sched;
-        // init_spinlock(&temp->lock); // 已移至全局
-        // temp->run_queue.rb_node=NULL; // 已移至全局
-        temp->task_count=0; // 注意：task_count的含义可能需要重新审视
-        // temp->current_proc=NULL;
-        // temp->idle=NULL; a
+        struct sched *s = &cpus[i].sched;
+        init_spinlock(&s->lock);
+        init_list_node(&s->run_queue);
+        s->task_count = 0;
     }
 }
 
 Proc *thisproc()
 {
-    // TODO: return the current process
-    // 可以根据当前的CPU是哪个来找到这个进程是哪个
     int id=cpuid();
     return cpus[id].sched.current_proc;
 }
 
 void init_schinfo(struct schinfo *p)
 {
-    // TODO: initialize your customized schinfo for every newly-created process
     p->vruntime=0;
     p->nice=0;
-    // 后续还会更新并覆盖的，这里可以直接设置为0
     p->start_exec_time=0;
 }
 
 void acquire_sched_lock()
 {
-    // TODO: acquire the sched_lock if need
-    acquire_spinlock(&global_sched_lock);
+    // 获取当前CPU的调度锁
+    acquire_spinlock(&cpus[cpuid()].sched.lock);
 }
 
 void release_sched_lock()
 {
-    // TODO: release the sched_lock if need
-    release_spinlock(&global_sched_lock);
+    // 释放当前CPU的调度锁
+    release_spinlock(&cpus[cpuid()].sched.lock);
 }
 
 bool is_zombie(Proc *p)
 {
+    // 使用全局锁保护状态读取
     bool r;
-    acquire_sched_lock();
+    acquire_spinlock(&global_sched_lock);
     r = p->state == ZOMBIE;
-    release_sched_lock();
+    release_spinlock(&global_sched_lock);
     return r;
 }
 
 bool activate_proc(Proc *p)
 {
-    // TODO:
-    acquire_sched_lock();
-    // if the proc->state is RUNNING/RUNNABLE, do nothing
     if (p->state==RUNNING||p->state==RUNNABLE){
-        release_sched_lock();
         return true;
     }
-    // if the proc->state if SLEEPING/UNUSED, set the process state to RUNNABLE and add it to the sched queue
-    else if (p->state==SLEEPING||p->state==UNUSED){
-        // printk("activate_proc: adding pid=%d to runqueue\n", p->pid);
-        p->state=RUNNABLE;
-        // if (p->schinfo.vruntime < global_min_vruntime) {
-        //     p->schinfo.vruntime = global_min_vruntime;
-        // }
-        // _rb_insert(&p->schinfo.node, &global_run_queue, compare_runtime);
-        // cpus[cpuid()].sched.task_count++; // 这个计数器现在是全局的了
-        // -------------------
-        DEBUG_PRINTK();
-        _insert_into_list(global_run_queue.prev,&p->schinfo.node);
-        DEBUG_PRINTK();
+    
+    if (p->state==SLEEPING||p->state==UNUSED){
+        // 选择任务数最少的CPU队列
+        int target_cpu = 0;
+        u64 min_count = cpus[0].sched.task_count;
+        
+        for (int i = 1; i < NCPU; i++) {
+            if (cpus[i].sched.task_count < min_count) {
+                min_count = cpus[i].sched.task_count;
+                target_cpu = i;
+            }
+        }
+        
+        // 将进程加入目标CPU的队列
+        acquire_spinlock(&cpus[target_cpu].sched.lock);
+        p->state = RUNNABLE;
+        _insert_into_list(cpus[target_cpu].sched.run_queue.prev, &p->schinfo.node);
+        cpus[target_cpu].sched.task_count++;
+        release_spinlock(&cpus[target_cpu].sched.lock);
+        
+        return true;
     }
-    // else: panic
-    else {
-        PANIC();
-    }
-    DEBUG_PRINTK();
-    release_sched_lock();
-    return true;
+    
+    PANIC();
+    return false;
 }
 
-// 用来把当前运行的函数切换出去，可能切换为RUNNABLE\SLEEPING\ZOMBIE
 static void update_this_state(enum procstate new_state)
 {
-    // TODO: if you use template sched function, you should implement this routinue
-    // update the state of current process to new_state, and modify the sched queue if necessary
-    Proc *this=thisproc();
+    Proc *this = thisproc();
     if (this->idle){
         return;
     }
-    // update_vruntime(this);
-    // if (this->state == RUNNABLE) {
-    //     _rb_erase(&this->schinfo.node, &global_run_queue);
-    // }
-    this->state=new_state;
-    if (new_state==RUNNABLE||new_state==RUNNING){
-        // if (this->schinfo.vruntime < global_min_vruntime) {
-        //     this->schinfo.vruntime = global_min_vruntime;
-        // }
-        // _rb_insert(&this->schinfo.node, &global_run_queue, compare_runtime);
-        // cpus[cpuid()].sched.task_count++;
-        // -------------------
-        //! 判断不在链表中
-        _merge_list(global_run_queue.prev,&this->schinfo.node);
-    }else if(new_state==SLEEPING||new_state==ZOMBIE){
-        // //不需要减少任务计数
+    
+    int my_cpu = cpuid();
+    this->state = new_state;
+    
+    if (new_state == RUNNABLE || new_state == RUNNING){
+        // 将当前进程放回当前CPU的队列
+        _merge_list(cpus[my_cpu].sched.run_queue.prev, &this->schinfo.node);
+    } else if (new_state == SLEEPING || new_state == ZOMBIE){
+        // 从队列中移除
         _detach_from_list(&this->schinfo.node);
-        
+        if (new_state == ZOMBIE) {
+            cpus[my_cpu].sched.task_count--;
+        }
     }
 }
 
-// static Proc *pick_next()
-// {
-//     // TODO: if using template sched function, you should implement this routinue
-//     // choose the next process to run, and return idle if no runnable process
-//     if (panic_flag) return cpus[cpuid()].sched.idle;
-    
-//     // --- 使用全局红黑树 ---
-//     rb_node next_node=_rb_first(&global_run_queue);
-//     // -------------------
-
-//     if (next_node){
-//         _rb_erase(next_node, &global_run_queue);
-//         // cpus[cpuid()].sched.task_count--;
-//         Proc *next_proc=container_of(next_node,Proc,schinfo.node);
-//         rb_node *new_first = _rb_first(&global_run_queue);
-//         if (new_first) {
-//             Proc *p = container_of(new_first, Proc, schinfo.node);
-//             global_min_vruntime = p->schinfo.vruntime;
-//         }
-
-//         next_proc->schinfo.start_exec_time=get_timestamp();
-        
-//         return next_proc;
-//     }else{
-//         return cpus[cpuid()].sched.idle;
-//     }
-// }
 static Proc *pick_next()
 {
-    // TODO: if using template sched function, you should implement this routinue
-    // choose the next process to run, and return idle if no runnable process
     if (panic_flag) return cpus[cpuid()].sched.idle;
     
-    // --- 使用全局红黑树 ---
-    // rb_node 已经被 typedef 为 struct rb_node_ *
-    // rb_node next_node=_rb_first(&global_run_queue);
-    // -------------------
-    // ListNode *next_node=NULL;
-    Proc *next_proc=NULL;
-    _for_in_list(node, &global_run_queue){
-        if (node==&global_run_queue)continue;
+    int my_cpu = cpuid();
+    ListNode *my_queue = &cpus[my_cpu].sched.run_queue;
+    Proc *next_proc = NULL;
+    
+    // 首先从当前CPU的队列中查找
+    _for_in_list(node, my_queue){
+        if (node == my_queue) continue;
         
-        Proc *p=container_of(node,Proc,schinfo.node);
-        if (p->state==RUNNABLE){
-            next_proc=p;
+        Proc *p = container_of(node, Proc, schinfo.node);
+        if (p->state == RUNNABLE){
+            next_proc = p;
             _detach_from_list(node);
-            break;
+            cpus[my_cpu].sched.task_count--;
+            return next_proc;
         }
-        // if (node->next==&global_run_queue){
-        //     break;
-        // }
     }
-    DEBUG_PRINTK();
-    if (next_proc){
-        // _rb_erase(next_node, &global_run_queue);
+    
+    // 当前队列为空，尝试工作窃取
+    // 先释放当前CPU的锁，避免死锁
+    release_spinlock(&cpus[my_cpu].sched.lock);
+    
+    for (int i = 0; i < NCPU; i++) {
+        if (i == my_cpu) continue;
         
-        // 在取出 vruntime 最小的进程后，更新全局的 min_vruntime
-        // 使其指向新的 vruntime 最小的进程。
-        // rb_node new_first = _rb_first(&global_run_queue);
-        // if (new_first) {
-        //     Proc *p = container_of(new_first, Proc, schinfo.node);
-        //     global_min_vruntime = p->schinfo.vruntime;
-        // }
-
-        // cpus[cpuid()].sched.task_count--;
-        // Proc *next_proc=container_of(next_node,Proc,schinfo.node);
-     
-        // next_proc->schinfo.start_exec_time=get_timestamp();
+        // 尝试从其他CPU窃取任务
+        acquire_spinlock(&cpus[i].sched.lock);
         
-        return next_proc;
-    }else{
-        return cpus[cpuid()].sched.idle;
+        ListNode *other_queue = &cpus[i].sched.run_queue;
+        Proc *stolen = NULL;
+        
+        _for_in_list(node, other_queue){
+            if (node == other_queue) continue;
+            
+            Proc *p = container_of(node, Proc, schinfo.node);
+            if (p->state == RUNNABLE){
+                stolen = p;
+                _detach_from_list(node);
+                cpus[i].sched.task_count--;
+                break;
+            }
+        }
+        
+        release_spinlock(&cpus[i].sched.lock);
+        
+        if (stolen) {
+            // 窃取成功，重新获取当前CPU的锁后返回
+            acquire_spinlock(&cpus[my_cpu].sched.lock);
+            return stolen;
+        }
     }
+    
+    // 没有找到任何可运行的进程，重新获取当前CPU的锁，返回idle进程
+    acquire_spinlock(&cpus[my_cpu].sched.lock);
+    return cpus[my_cpu].sched.idle;
 }
 
-// 设置当前CPU运行的进程
 static void update_this_proc(Proc *p)
 {
-    // TODO: you should implement this routinue
-    // update thisproc to the choosen process
-    // reset_clock(1000);
-    cpus[cpuid()].sched.current_proc=p;
+    cpus[cpuid()].sched.current_proc = p;
 }
 
-// A simple scheduler.
-// You are allowed to replace it with whatever you like.
-// call with sched_lock
 void sched(enum procstate new_state)
 {
     auto this = thisproc();
 #ifdef debug_sched
-    // if (this->state != RUNNING)
     printk("this cpu is %lld, process's pid is %d, state is %d\n",cpuid(), this->pid, this->state);
 #endif
     ASSERT(this->state == RUNNING);
-    //! 给进程传入新的目标状态
+    
     update_this_state(new_state);
     auto next = pick_next();
     update_this_proc(next);
-    if (next->state!=RUNNABLE && !next->idle){
+    
+    if (next->state != RUNNABLE && !next->idle){
         printk("This proc is: %d, it is %d\n",this->pid,this->state);
         printk("Next proc is: %d, it is %d\n",next->pid,next->state);
     }
-    ASSERT(next->state == RUNNABLE||next->idle);
+    ASSERT(next->state == RUNNABLE || next->idle);
     next->state = RUNNING;
     
     if (next != this) {
         auto old_ctx = &this->kcontext;
-        // ← 在切换前释放！
         swtch(next->kcontext, old_ctx);
     }
-    release_sched_lock(); //!
+    release_sched_lock();
 }
 
 u64 proc_entry(void (*entry)(u64), u64 arg)
