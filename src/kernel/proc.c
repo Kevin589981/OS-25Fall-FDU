@@ -82,12 +82,13 @@ void init_proc(Proc *p)
 
     acquire_spinlock(&global_process_lock);
 
-    init_sem(&p->childexit, 1);
+    init_sem(&p->childexit, 0);
     init_list_node(&p->children);
     init_list_node(&p->ptnode);
     p->idle = FALSE;
     p->exitcode = 0;
     p->killed = FALSE;
+    p->parent = NULL;
     p->pid = pid_allocator();
     p->state = UNUSED;
     p->kstack = kalloc_page();
@@ -96,7 +97,7 @@ void init_proc(Proc *p)
     init_schinfo(&p->schinfo);
     
     if (p->kstack == NULL) {
-        release_spinlock(&global_process_lock);
+        // release_spinlock(&global_process_lock);
         PANIC();
     }
     memset(p->kstack, 0, PAGE_SIZE);
@@ -168,8 +169,8 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
 int wait(int *exitcode)
 {
     // TODO:
-    acquire_spinlock(&global_process_lock);
-    Proc *parent=thisproc();
+    
+    
     // 1. return -1 if no children
     // acquire_spinlock(&global_process_lock);
     // if (_empty_list(&parent->children)){
@@ -185,7 +186,8 @@ int wait(int *exitcode)
         // }
     // 2. wait for childexit
     // 3. if any child exits, clean it up and return its pid and exitcode
-        
+        Proc *parent=thisproc();
+        acquire_spinlock(&global_process_lock);
         bool has_children = !_empty_list(&parent->children);
         if (!has_children){
             release_spinlock(&global_process_lock);
@@ -225,7 +227,7 @@ int wait(int *exitcode)
         release_spinlock(&global_process_lock);
         wait_sem(&parent->childexit);
 
-        acquire_spinlock(&global_process_lock);
+        
     }
 }
 
@@ -233,10 +235,10 @@ NO_RETURN void exit(int code)
 {
     // TODO:
     // 1. set the exitcode
-    
+    Proc *p=thisproc();
      
     acquire_spinlock(&global_process_lock);
-    Proc *p=thisproc();
+    // acquire_sched_lock();
     // p->state=ZOMBIE; //会导致sched.c:163发生PANIC
 #ifdef debug_sched //{ UNUSED, RUNNABLE, RUNNING, SLEEPING, ZOMBIE };
     printk("proc.c:224, p->state is %d\n",p->state);
@@ -257,24 +259,79 @@ NO_RETURN void exit(int code)
     //     ListNode *temp=_detach_from_list(&p->children);
     //     _merge_list(&root_proc.children, temp);
     // }
+    // bool has_zombie_to_reparent = false;
 
-    _for_in_list(node,&p->children){
-        if (node==&p->children){
-            continue;
+    // // 1. 遍历所有子进程，更新它们的 parent 指针并检查僵尸状态
+    // //    使用 _for_in_list_safe 是一个好习惯，尽管在这里我们是移动整个列表
+    // _for_in_list(node, &p->children) {
+    //     Proc *child = container_of(node, Proc, ptnode);
+        
+    //     // 关键修复 #1: 更新父进程指针
+    //     child->parent = &root_proc;
+
+    //     // 关键修复 #2: 检查是否存在已是僵尸的子进程
+    //     if (child->state == ZOMBIE) {
+    //         has_zombie_to_reparent = true;
+    //     }
+    // }
+
+    // // 2. 将整个子进程链表过继给 root_proc
+    // if (!_empty_list(&p->children)) {
+    //     // 你的 _merge_list 应该能正确地将 p->children 的所有节点
+    //     // 移动到 root_proc.children 中。
+    //     // 一个标准的实现是：
+    //     // a. 取出 p->children 的第一个和最后一个节点
+    //     // b. 将它们链接到 root_proc.children 的末尾
+    //     ListNode *temp = _detach_from_list(&p->children);
+    //     _merge_list(&root_proc.children, temp); // 假设你有这样的函数
+    //                                                    // 如果你的_merge_list(dst, src_head)能工作，也可以
+    // }
+    
+    // // 清空自己的子进程链表
+    // init_list_node(&p->children);
+
+    // if (has_zombie_to_reparent) {
+    //     post_sem(&root_proc.childexit);
+    // }
+
+    ListNode orphaned_children;
+    init_list_node(&orphaned_children);
+    while (!_empty_list(&p->children)) {
+        ListNode *child_node = p->children.next;
+        _detach_from_list(child_node);
+        _insert_into_list(&orphaned_children, child_node);
+    }
+    while (!_empty_list(&orphaned_children)) {
+        ListNode *child_node = orphaned_children.next;
+        _detach_from_list(child_node);
+        _insert_into_list(&root_proc.children, child_node);
+        Proc *child = container_of(child_node, Proc, ptnode);
+        child->parent = &root_proc;
+        if (child->state == ZOMBIE) {
+            if ((u64)&root_proc<0x20){
+                printk("Error proc.c: 312\n");
+            }
+            post_sem(&root_proc.childexit);
         }
-        auto child=container_of(node,Proc,ptnode);
-        child->parent=&root_proc;
-        _insert_into_list(&root_proc.children,&child->ptnode);
+
     }
 
-    init_list_node(&p->children);
-    // if (p->parent){
-    //     post_sem(&p->parent->childexit);
-    // }
+    if (!p->parent){
+        p->parent=&root_proc;
+        _insert_into_list(&root_proc.children, &p->ptnode);
+    }
     release_spinlock(&global_process_lock);
+    if ((u64)p->parent<0x20){
+        printk("BUG at proc.c :325\n");
+    }
+    post_sem(&p->parent->childexit);
+    
     // 4. sched(ZOMBIE)
+    
+    // *cpus[cpuid()].zombie_to_reap=*p->kcontext;
     acquire_sched_lock();
-    sched(DYING);
+    // sched(DYING);
+    sched(ZOMBIE);
     // NOTE: be careful of concurrency
     
     // kfree(p);

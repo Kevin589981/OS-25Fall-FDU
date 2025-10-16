@@ -19,7 +19,7 @@ struct cpu {
     bool online;
     struct rb_root_ timer;
     struct sched sched;
-    Proc *zombie_to_reap;
+    KernelContext *zombie_to_reap; // 需要回收的僵尸进程
 };
 
 extern SpinLock global_sched_lock;
