@@ -187,9 +187,9 @@ static void update_this_state(enum procstate new_state)
     if (new_state == RUNNABLE) {
         // RUNNING -> RUNNABLE: 插入红黑树
         _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
-    } else if (new_state == SLEEPING || new_state == ZOMBIE) {
+    } else if (new_state == SLEEPING || new_state == ZOMBIE||new_state==DYING) {
         // 从RUNNING变为SLEEPING/ZOMBIE，不需要操作红黑树（因为本来就不在树中）
-        if (new_state == ZOMBIE) {
+        if (new_state == ZOMBIE||new_state==DYING) {
             cpus[my_cpu].sched.task_count--;
         }
     }
@@ -275,17 +275,29 @@ void sched(enum procstate new_state)
     
     next->state = RUNNING;
     next->schinfo.start_exec_time = get_timestamp();
-    
-    if (next != this) {
-        auto old_ctx = &this->kcontext;
-        swtch(next->kcontext, old_ctx);
+    if (new_state==DYING){
+        cpus[cpuid()].zombie_to_reap=this;
     }
-    release_sched_lock();
+    // if (next != this) {
+    auto old_ctx = &this->kcontext;
+    swtch(next->kcontext, old_ctx);
+// }
+    // release_sched_lock();
+
+    if (cpus[cpuid()].zombie_to_reap){
+        // acquire_spinlock(&global_sched_lock);
+        Proc *p=cpus[cpuid()].zombie_to_reap;
+        cpus[cpuid()].zombie_to_reap=NULL;
+        p->state=ZOMBIE;
+        post_sem(&p->parent->childexit);
+        // release_spinlock(&global_sched_lock);
+    }
+
 }
 
 u64 proc_entry(void (*entry)(u64), u64 arg)
 {
-    release_sched_lock();
+    // release_sched_lock();
     set_return_addr(entry);
     return arg;
 }

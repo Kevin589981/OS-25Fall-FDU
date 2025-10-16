@@ -5,7 +5,7 @@
 #include <common/sem.h>
 #include <common/rbtree.h>
 
-enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, ZOMBIE };
+enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, ZOMBIE,DYING };
 
 typedef struct UserContext {
     u64 spsr, elr;

@@ -19,6 +19,7 @@ struct cpu {
     bool online;
     struct rb_root_ timer;
     struct sched sched;
+    Proc *zombie_to_reap;
 };
 
 extern SpinLock global_sched_lock;

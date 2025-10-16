@@ -253,18 +253,28 @@ NO_RETURN void exit(int code)
 // #ifdef debug_page_fault
 //     printk("proc's ptnode is %llx, proc's children is %llx\n", (u64)&p->ptnode,(u64)&p->children);
 // #endif
-    if (!_empty_list(&p->children)){
-        ListNode *temp=_detach_from_list(&p->children);
-        _merge_list(&root_proc.children, temp);
+    // if (!_empty_list(&p->children)){
+    //     ListNode *temp=_detach_from_list(&p->children);
+    //     _merge_list(&root_proc.children, temp);
+    // }
+
+    _for_in_list(node,&p->children){
+        if (node==&p->children){
+            continue;
+        }
+        auto child=container_of(node,Proc,ptnode);
+        child->parent=&root_proc;
+        _insert_into_list(&root_proc.children,&child->ptnode);
     }
+
     init_list_node(&p->children);
-    if (p->parent){
-        post_sem(&p->parent->childexit);
-    }
+    // if (p->parent){
+    //     post_sem(&p->parent->childexit);
+    // }
     release_spinlock(&global_process_lock);
     // 4. sched(ZOMBIE)
     acquire_sched_lock();
-    sched(ZOMBIE);
+    sched(DYING);
     // NOTE: be careful of concurrency
     
     // kfree(p);
