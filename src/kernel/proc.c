@@ -82,7 +82,7 @@ void init_proc(Proc *p)
 
     acquire_spinlock(&global_process_lock);
 
-    init_sem(&p->childexit, 0);
+    init_sem(&p->childexit, 1);
     init_list_node(&p->children);
     init_list_node(&p->ptnode);
     p->idle = FALSE;
@@ -161,7 +161,7 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
     int id =p->pid;
     activate_proc(p);//activate函数内部有锁
     // NOTE: be careful of concurrency
-    printk("cpuid: %lld, start pid: %d\n",cpuid(),p->pid);
+    printk("cpuid: %lld, start pid: %d, its parent is %d\n",cpuid(),p->pid,p->parent->pid);
     return id;
 
 }
@@ -188,7 +188,7 @@ int wait(int *exitcode)
     // 3. if any child exits, clean it up and return its pid and exitcode
         Proc *parent=thisproc();
         acquire_spinlock(&global_process_lock);
-        printk("191:proc.c: wait(), parent pid is %d\n",parent->pid);
+        // printk("191:proc.c: wait(), parent pid is %d\n",parent->pid);
         bool has_children = !_empty_list(&parent->children);
         if (!has_children){
             // printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
@@ -196,7 +196,7 @@ int wait(int *exitcode)
             printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
             return -1;
         }
-        printk("197:proc.c: wait(), parent pid is %d\n",parent->pid);
+        // printk("197:proc.c: wait(), parent pid is %d\n",parent->pid);
         Proc *zombie_child=NULL;
         // if (has_children) {
         _for_in_list(node, &parent->children) {
@@ -204,7 +204,7 @@ int wait(int *exitcode)
                 continue;
             }
             Proc *p = container_of(node, Proc, ptnode);
-            printk("Checking child pid: %d\n", p->pid);
+            // printk("Checking child pid: %d\n", p->pid);
             if (is_zombie(p)) {
                 zombie_child = p;
                 printk("Found zombie child pid: %d\n", p->pid);
@@ -214,7 +214,7 @@ int wait(int *exitcode)
             //     break;
             // }
         }
-        printk("210:proc.c: wait(), parent pid is %d\n",parent->pid);
+        // printk("210:proc.c: wait(), parent pid is %d\n",parent->pid);
         // }
         if (zombie_child){
             if (exitcode!=NULL){
@@ -316,7 +316,7 @@ NO_RETURN void exit(int code)
         _insert_into_list(&root_proc.children, child_node);
         Proc *child = container_of(child_node, Proc, ptnode);
         child->parent = &root_proc;
-        if (child->state == ZOMBIE) {
+        if (is_zombie(child)) {
             if ((u64)&root_proc<0x20){
                 printk("Error proc.c: 312\n");
             }
@@ -324,12 +324,13 @@ NO_RETURN void exit(int code)
         }
 
     }
-
     if (!p->parent){
         p->parent=&root_proc;
+        _detach_from_list(&p->ptnode);
         _insert_into_list(&root_proc.children, &p->ptnode);
     }
-    release_spinlock(&global_process_lock);
+
+    
     if ((u64)p->parent<0x20){
         printk("BUG at proc.c :325\n");
     }
@@ -340,7 +341,10 @@ NO_RETURN void exit(int code)
     // *cpus[cpuid()].zombie_to_reap=*p->kcontext;
     acquire_sched_lock();
     acquire_spinlock(&p->lock);
+
+
     post_sem(&p->parent->childexit);
+    release_spinlock(&global_process_lock);
     // sched(DYING);
     sched(ZOMBIE);
     // NOTE: be careful of concurrency

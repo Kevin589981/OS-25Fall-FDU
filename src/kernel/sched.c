@@ -305,7 +305,7 @@ void sched(enum procstate new_state)
     //     cpus[cpuid()].zombie_to_reap=this;
     // }
     if (next != this) {
-        
+        *cpus[cpuid()].zombie_to_reap=*this->kcontext;
         auto old_ctx = &cpus[cpuid()].zombie_to_reap; //写到一个专门的无用页面上
         
         if (new_state!=ZOMBIE){

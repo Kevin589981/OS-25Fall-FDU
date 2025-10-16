@@ -104,9 +104,11 @@ void release_sched_lock()
 bool is_zombie(Proc *p)
 {
     bool r;
-    acquire_spinlock(&global_sched_lock);
+    acquire_spinlock(&p->lock);
+    // acquire_spinlock(&global_sched_lock);
     r = p->state == ZOMBIE;
-    release_spinlock(&global_sched_lock);
+    // release_spinlock(&global_sched_lock);
+    release_spinlock(&p->lock);
     return r;
 }
 
@@ -305,10 +307,13 @@ void sched(enum procstate new_state)
     //     cpus[cpuid()].zombie_to_reap=this;
     // }
     if (next != this) {
-        auto old_ctx = &cpus[cpuid()].zombie_to_reap;
+        *cpus[cpuid()].zombie_to_reap=*this->kcontext;
+        auto old_ctx = &cpus[cpuid()].zombie_to_reap; //写到一个专门的无用页面上
         
         if (new_state!=ZOMBIE){
             old_ctx = &this->kcontext;
+        }else {
+            release_spinlock(&this->lock);
         }
         swtch(next->kcontext, old_ctx);
     }
@@ -381,6 +386,7 @@ typedef struct Proc {
     void *kstack;
     UserContext *ucontext;
     KernelContext *kcontext;
+    SpinLock lock;
 } Proc;
 
 void init_kproc();
@@ -476,7 +482,7 @@ void init_proc(Proc *p)
 
     acquire_spinlock(&global_process_lock);
 
-    init_sem(&p->childexit, 0);
+    init_sem(&p->childexit, 1);
     init_list_node(&p->children);
     init_list_node(&p->ptnode);
     p->idle = FALSE;
@@ -486,7 +492,7 @@ void init_proc(Proc *p)
     p->pid = pid_allocator();
     p->state = UNUSED;
     p->kstack = kalloc_page();
-    
+    init_spinlock(&p->lock);
     // 初始化调度信息
     init_schinfo(&p->schinfo);
     
@@ -555,7 +561,7 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
     int id =p->pid;
     activate_proc(p);//activate函数内部有锁
     // NOTE: be careful of concurrency
-    printk("cpuid: %lld, start pid: %d\n",cpuid(),p->pid);
+    printk("cpuid: %lld, start pid: %d, its parent is %d\n",cpuid(),p->pid,p->parent->pid);
     return id;
 
 }
@@ -582,24 +588,33 @@ int wait(int *exitcode)
     // 3. if any child exits, clean it up and return its pid and exitcode
         Proc *parent=thisproc();
         acquire_spinlock(&global_process_lock);
+        // printk("191:proc.c: wait(), parent pid is %d\n",parent->pid);
         bool has_children = !_empty_list(&parent->children);
         if (!has_children){
+            // printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
             release_spinlock(&global_process_lock);
+            printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
             return -1;
         }
-
+        // printk("197:proc.c: wait(), parent pid is %d\n",parent->pid);
         Proc *zombie_child=NULL;
         // if (has_children) {
         _for_in_list(node, &parent->children) {
+            if (node==&parent->children){
+                continue;
+            }
             Proc *p = container_of(node, Proc, ptnode);
-            if (p->state == ZOMBIE) {
+            // printk("Checking child pid: %d\n", p->pid);
+            if (is_zombie(p)) {
                 zombie_child = p;
+                printk("Found zombie child pid: %d\n", p->pid);
                 break;
             }
             // if (node->next==&parent->children){
             //     break;
             // }
         }
+        // printk("210:proc.c: wait(), parent pid is %d\n",parent->pid);
         // }
         if (zombie_child){
             if (exitcode!=NULL){
@@ -701,7 +716,7 @@ NO_RETURN void exit(int code)
         _insert_into_list(&root_proc.children, child_node);
         Proc *child = container_of(child_node, Proc, ptnode);
         child->parent = &root_proc;
-        if (child->state == ZOMBIE) {
+        if (is_zombie(child)) {
             if ((u64)&root_proc<0x20){
                 printk("Error proc.c: 312\n");
             }
@@ -709,21 +724,27 @@ NO_RETURN void exit(int code)
         }
 
     }
-
     if (!p->parent){
         p->parent=&root_proc;
+        _detach_from_list(&p->ptnode);
         _insert_into_list(&root_proc.children, &p->ptnode);
     }
-    release_spinlock(&global_process_lock);
+
+    
     if ((u64)p->parent<0x20){
         printk("BUG at proc.c :325\n");
     }
-    post_sem(&p->parent->childexit);
+    
     
     // 4. sched(ZOMBIE)
     
     // *cpus[cpuid()].zombie_to_reap=*p->kcontext;
     acquire_sched_lock();
+    acquire_spinlock(&p->lock);
+
+
+    post_sem(&p->parent->childexit);
+    release_spinlock(&global_process_lock);
     // sched(DYING);
     sched(ZOMBIE);
     // NOTE: be careful of concurrency
@@ -855,4 +876,36 @@ void post_sem(Semaphore *sem)
     }
     release_spinlock(&sem->lock);
 }
+================================================================================
+#swtch.S
+
+// Do kernel-mode context switch
+// x0 (first parameter): new context ptr
+// x1 (second parameter): addr to save old context ptr
+
+#define pushp(a, b) stp a, b, [sp, #-0x10]!
+#define popp(a, b) ldp a, b, [sp], #0x10 
+
+.globl swtch
+swtch:
+// TODO: save and restore KernelContext
+pushp(x28,x29)
+pushp(x26,x27)
+pushp(x24,x25)
+pushp(x22,x23)
+pushp(x20,x21)
+pushp(x1,x19)
+pushp(lr,x0)
+mov x2,sp
+str x2,[x1] //根据swtch函数，x1是旧进程的kcontext的指针
+mov sp,x0 
+popp(lr,x0)
+popp(x1,x19)
+popp(x20,x21)
+popp(x22,x23)
+popp(x24,x25)
+popp(x26,x27)
+popp(x28,x29)
+ret
+
 ================================================================================

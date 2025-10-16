@@ -23,7 +23,8 @@ if __name__ == "__main__":
         "src/kernel/proc.h",
         "src/kernel/proc.c",
         "src/kernel/cpu.h",
-        "src/common/sem.c"
+        "src/common/sem.c",
+        "src/aarch64/swtch.S"
     ]
     
     # 定义输出文件路径
