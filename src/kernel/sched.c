@@ -102,9 +102,11 @@ void release_sched_lock()
 bool is_zombie(Proc *p)
 {
     bool r;
-    acquire_spinlock(&global_sched_lock);
+    acquire_spinlock(&p->lock);
+    // acquire_spinlock(&global_sched_lock);
     r = p->state == ZOMBIE;
-    release_spinlock(&global_sched_lock);
+    // release_spinlock(&global_sched_lock);
+    release_spinlock(&p->lock);
     return r;
 }
 
@@ -304,9 +306,12 @@ void sched(enum procstate new_state)
     // }
     if (next != this) {
         
-        auto old_ctx = &this->kcontext;
-        if (new_state==ZOMBIE){
-            old_ctx = &cpus[cpuid()].zombie_to_reap;
+        auto old_ctx = &cpus[cpuid()].zombie_to_reap; //写到一个专门的无用页面上
+        
+        if (new_state!=ZOMBIE){
+            old_ctx = &this->kcontext;
+        }else {
+            release_spinlock(&this->lock);
         }
         swtch(next->kcontext, old_ctx);
     }

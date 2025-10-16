@@ -92,7 +92,7 @@ void init_proc(Proc *p)
     p->pid = pid_allocator();
     p->state = UNUSED;
     p->kstack = kalloc_page();
-    
+    init_spinlock(&p->lock);
     // 初始化调度信息
     init_schinfo(&p->schinfo);
     
@@ -188,24 +188,33 @@ int wait(int *exitcode)
     // 3. if any child exits, clean it up and return its pid and exitcode
         Proc *parent=thisproc();
         acquire_spinlock(&global_process_lock);
+        printk("191:proc.c: wait(), parent pid is %d\n",parent->pid);
         bool has_children = !_empty_list(&parent->children);
         if (!has_children){
+            // printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
             release_spinlock(&global_process_lock);
+            printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
             return -1;
         }
-
+        printk("197:proc.c: wait(), parent pid is %d\n",parent->pid);
         Proc *zombie_child=NULL;
         // if (has_children) {
         _for_in_list(node, &parent->children) {
+            if (node==&parent->children){
+                continue;
+            }
             Proc *p = container_of(node, Proc, ptnode);
-            if (p->state == ZOMBIE) {
+            printk("Checking child pid: %d\n", p->pid);
+            if (is_zombie(p)) {
                 zombie_child = p;
+                printk("Found zombie child pid: %d\n", p->pid);
                 break;
             }
             // if (node->next==&parent->children){
             //     break;
             // }
         }
+        printk("210:proc.c: wait(), parent pid is %d\n",parent->pid);
         // }
         if (zombie_child){
             if (exitcode!=NULL){
@@ -324,12 +333,14 @@ NO_RETURN void exit(int code)
     if ((u64)p->parent<0x20){
         printk("BUG at proc.c :325\n");
     }
-    post_sem(&p->parent->childexit);
+    
     
     // 4. sched(ZOMBIE)
     
     // *cpus[cpuid()].zombie_to_reap=*p->kcontext;
     acquire_sched_lock();
+    acquire_spinlock(&p->lock);
+    post_sem(&p->parent->childexit);
     // sched(DYING);
     sched(ZOMBIE);
     // NOTE: be careful of concurrency

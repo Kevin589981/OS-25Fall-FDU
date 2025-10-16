@@ -71,6 +71,7 @@ void init_sched()
         s->run_queue.rb_node = NULL;
         s->task_count = 0;
         s->min_vruntime = 0;
+        cpus[i].zombie_to_reap=kalloc(sizeof(KernelContext));
     }
 }
 
@@ -90,10 +91,10 @@ void init_schinfo(struct schinfo *p)
     p->node.__rb_parent_color = 0;
 }
 
-void acquire_sched_lock()
-{
-    acquire_spinlock(&cpus[cpuid()].sched.lock);
-}
+// void acquire_sched_lock()
+// {
+//     acquire_spinlock(&cpus[cpuid()].sched.lock);
+// }
 
 void release_sched_lock()
 {
@@ -118,27 +119,32 @@ bool activate_proc(Proc *p)
     if (p->state == SLEEPING || p->state == UNUSED) {
         // 选择任务数最少的CPU
         int target_cpu = 0;
-        u64 min_count = cpus[0].sched.task_count;
+        // u64 min_count = cpus[0].sched.task_count;
         
-        for (int i = 1; i < NCPU; i++) {
-            if (cpus[i].sched.task_count < min_count) {
-                min_count = cpus[i].sched.task_count;
-                target_cpu = i;
+        // for (int i = 1; i < NCPU; i++) {
+        //     if (cpus[i].sched.task_count < min_count) {
+        //         min_count = cpus[i].sched.task_count;
+        //         target_cpu = i;
+        //     }
+        // }
+        for (int i=cpuid();i>=0;i=(i+1)%4)
+        {
+            target_cpu=i;
+            if (!try_acquire_spinlock(&cpus[target_cpu].sched.lock)){
+                continue;
             }
+        
+            // 新进程的vruntime设置为当前最小vruntime，避免饥饿
+            p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime;
+            p->state = RUNNABLE;
+        
+            // 插入红黑树
+            _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
+            cpus[target_cpu].sched.task_count++;
+        
+            release_spinlock(&cpus[target_cpu].sched.lock);
+            return true;
         }
-        
-        acquire_spinlock(&cpus[target_cpu].sched.lock);
-        
-        // 新进程的vruntime设置为当前最小vruntime，避免饥饿
-        p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime;
-        p->state = RUNNABLE;
-        
-        // 插入红黑树
-        _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
-        cpus[target_cpu].sched.task_count++;
-        
-        release_spinlock(&cpus[target_cpu].sched.lock);
-        return true;
     }
     
     PANIC();
@@ -273,6 +279,9 @@ static void update_this_proc(Proc *p)
 void sched(enum procstate new_state)
 {
     auto this = thisproc();
+    if (this->pid==1 && new_state==ZOMBIE){
+        printk("init proc is dying\n");
+    }
 #ifdef debug_sched
     printk("this cpu is %lld, process's pid is %d, state is %d\n", 
            cpuid(), this->pid, this->state);
@@ -280,6 +289,7 @@ void sched(enum procstate new_state)
     ASSERT(this->state == RUNNING);
     
     update_this_state(new_state);
+    // post_sem(&this->parent->childexit);
     auto next = pick_next();
     update_this_proc(next);
     
@@ -295,7 +305,11 @@ void sched(enum procstate new_state)
     //     cpus[cpuid()].zombie_to_reap=this;
     // }
     if (next != this) {
-        auto old_ctx = &this->kcontext;
+        auto old_ctx = &cpus[cpuid()].zombie_to_reap;
+        
+        if (new_state!=ZOMBIE){
+            old_ctx = &this->kcontext;
+        }
         swtch(next->kcontext, old_ctx);
     }
     release_sched_lock();
@@ -313,7 +327,7 @@ void sched(enum procstate new_state)
 
 u64 proc_entry(void (*entry)(u64), u64 arg)
 {
-    // release_sched_lock();
+    release_sched_lock();
     set_return_addr(entry);
     return arg;
 }
@@ -462,12 +476,13 @@ void init_proc(Proc *p)
 
     acquire_spinlock(&global_process_lock);
 
-    init_sem(&p->childexit, 1);
+    init_sem(&p->childexit, 0);
     init_list_node(&p->children);
     init_list_node(&p->ptnode);
     p->idle = FALSE;
     p->exitcode = 0;
     p->killed = FALSE;
+    p->parent = NULL;
     p->pid = pid_allocator();
     p->state = UNUSED;
     p->kstack = kalloc_page();
@@ -476,7 +491,7 @@ void init_proc(Proc *p)
     init_schinfo(&p->schinfo);
     
     if (p->kstack == NULL) {
-        release_spinlock(&global_process_lock);
+        // release_spinlock(&global_process_lock);
         PANIC();
     }
     memset(p->kstack, 0, PAGE_SIZE);
@@ -548,8 +563,8 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
 int wait(int *exitcode)
 {
     // TODO:
-    acquire_spinlock(&global_process_lock);
-    Proc *parent=thisproc();
+    
+    
     // 1. return -1 if no children
     // acquire_spinlock(&global_process_lock);
     // if (_empty_list(&parent->children)){
@@ -565,7 +580,8 @@ int wait(int *exitcode)
         // }
     // 2. wait for childexit
     // 3. if any child exits, clean it up and return its pid and exitcode
-        
+        Proc *parent=thisproc();
+        acquire_spinlock(&global_process_lock);
         bool has_children = !_empty_list(&parent->children);
         if (!has_children){
             release_spinlock(&global_process_lock);
@@ -605,7 +621,7 @@ int wait(int *exitcode)
         release_spinlock(&global_process_lock);
         wait_sem(&parent->childexit);
 
-        acquire_spinlock(&global_process_lock);
+        
     }
 }
 
@@ -613,10 +629,10 @@ NO_RETURN void exit(int code)
 {
     // TODO:
     // 1. set the exitcode
-    
+    Proc *p=thisproc();
      
     acquire_spinlock(&global_process_lock);
-    Proc *p=thisproc();
+    // acquire_sched_lock();
     // p->state=ZOMBIE; //会导致sched.c:163发生PANIC
 #ifdef debug_sched //{ UNUSED, RUNNABLE, RUNNING, SLEEPING, ZOMBIE };
     printk("proc.c:224, p->state is %d\n",p->state);
@@ -637,47 +653,76 @@ NO_RETURN void exit(int code)
     //     ListNode *temp=_detach_from_list(&p->children);
     //     _merge_list(&root_proc.children, temp);
     // }
-    bool has_zombie_to_reparent = false;
+    // bool has_zombie_to_reparent = false;
 
-    // 1. 遍历所有子进程，更新它们的 parent 指针并检查僵尸状态
-    //    使用 _for_in_list_safe 是一个好习惯，尽管在这里我们是移动整个列表
-    _for_in_list(node, &p->children) {
-        Proc *child = container_of(node, Proc, ptnode);
+    // // 1. 遍历所有子进程，更新它们的 parent 指针并检查僵尸状态
+    // //    使用 _for_in_list_safe 是一个好习惯，尽管在这里我们是移动整个列表
+    // _for_in_list(node, &p->children) {
+    //     Proc *child = container_of(node, Proc, ptnode);
         
-        // 关键修复 #1: 更新父进程指针
-        child->parent = &root_proc;
+    //     // 关键修复 #1: 更新父进程指针
+    //     child->parent = &root_proc;
 
-        // 关键修复 #2: 检查是否存在已是僵尸的子进程
-        if (child->state == ZOMBIE) {
-            has_zombie_to_reparent = true;
-        }
-    }
+    //     // 关键修复 #2: 检查是否存在已是僵尸的子进程
+    //     if (child->state == ZOMBIE) {
+    //         has_zombie_to_reparent = true;
+    //     }
+    // }
 
-    // 2. 将整个子进程链表过继给 root_proc
-    if (!_empty_list(&p->children)) {
-        // 你的 _merge_list 应该能正确地将 p->children 的所有节点
-        // 移动到 root_proc.children 中。
-        // 一个标准的实现是：
-        // a. 取出 p->children 的第一个和最后一个节点
-        // b. 将它们链接到 root_proc.children 的末尾
-        ListNode *temp = _detach_from_list(&p->children);
-        _merge_list(&root_proc.children, temp); // 假设你有这样的函数
-                                                       // 如果你的_merge_list(dst, src_head)能工作，也可以
-    }
+    // // 2. 将整个子进程链表过继给 root_proc
+    // if (!_empty_list(&p->children)) {
+    //     // 你的 _merge_list 应该能正确地将 p->children 的所有节点
+    //     // 移动到 root_proc.children 中。
+    //     // 一个标准的实现是：
+    //     // a. 取出 p->children 的第一个和最后一个节点
+    //     // b. 将它们链接到 root_proc.children 的末尾
+    //     ListNode *temp = _detach_from_list(&p->children);
+    //     _merge_list(&root_proc.children, temp); // 假设你有这样的函数
+    //                                                    // 如果你的_merge_list(dst, src_head)能工作，也可以
+    // }
     
-    // 清空自己的子进程链表
-    init_list_node(&p->children);
+    // // 清空自己的子进程链表
+    // init_list_node(&p->children);
 
-    if (has_zombie_to_reparent) {
-        post_sem(&root_proc.childexit);
+    // if (has_zombie_to_reparent) {
+    //     post_sem(&root_proc.childexit);
+    // }
+
+    ListNode orphaned_children;
+    init_list_node(&orphaned_children);
+    while (!_empty_list(&p->children)) {
+        ListNode *child_node = p->children.next;
+        _detach_from_list(child_node);
+        _insert_into_list(&orphaned_children, child_node);
     }
+    while (!_empty_list(&orphaned_children)) {
+        ListNode *child_node = orphaned_children.next;
+        _detach_from_list(child_node);
+        _insert_into_list(&root_proc.children, child_node);
+        Proc *child = container_of(child_node, Proc, ptnode);
+        child->parent = &root_proc;
+        if (child->state == ZOMBIE) {
+            if ((u64)&root_proc<0x20){
+                printk("Error proc.c: 312\n");
+            }
+            post_sem(&root_proc.childexit);
+        }
+
+    }
+
     if (!p->parent){
         p->parent=&root_proc;
         _insert_into_list(&root_proc.children, &p->ptnode);
     }
-    post_sem(&p->parent->childexit);
     release_spinlock(&global_process_lock);
+    if ((u64)p->parent<0x20){
+        printk("BUG at proc.c :325\n");
+    }
+    post_sem(&p->parent->childexit);
+    
     // 4. sched(ZOMBIE)
+    
+    // *cpus[cpuid()].zombie_to_reap=*p->kcontext;
     acquire_sched_lock();
     // sched(DYING);
     sched(ZOMBIE);
@@ -711,7 +756,7 @@ struct cpu {
     bool online;
     struct rb_root_ timer;
     struct sched sched;
-    Proc *zombie_to_reap;
+    KernelContext *zombie_to_reap; // 需要回收的僵尸进程
 };
 
 extern SpinLock global_sched_lock;
@@ -720,322 +765,94 @@ extern struct cpu cpus[NCPU];
 void set_cpu_on();
 void set_cpu_off();
 ================================================================================
-#rbtree.c
+#sem.c
 
-#include "rbtree.h"
-#define RB_RED 0
-#define RB_BLACK 1
-#define rb_parent(r) ((rb_node)((r)->__rb_parent_color & ~3))
-#define __rb_parent(pc) ((rb_node)(pc & ~3))
+#include <common/sem.h>
+#include <kernel/mem.h>
+#include <kernel/sched.h>
+#include <kernel/printk.h>
+#include <common/list.h>
+#include <kernel/debug.h>
+void init_sem(Semaphore *sem, int val)
+{
+    sem->val = val;
+    init_spinlock(&sem->lock);
+    init_list_node(&sem->sleeplist);
+}
 
-#define __rb_color(pc) ((pc) & 1)
-#define __rb_is_black(pc) __rb_color(pc)
-#define __rb_is_red(pc) (!__rb_color(pc))
-#define rb_color(rb) __rb_color((rb)->__rb_parent_color)
-#define rb_is_red(rb) __rb_is_red((rb)->__rb_parent_color)
-#define rb_is_black(rb) __rb_is_black((rb)->__rb_parent_color)
-static inline void rb_set_black(rb_node rb)
+bool get_sem(Semaphore *sem)
 {
-    rb->__rb_parent_color |= RB_BLACK;
+    bool ret = false;
+    acquire_spinlock(&sem->lock);
+    if (sem->val > 0) {
+        sem->val--;
+        ret = true;
+    }
+    release_spinlock(&sem->lock);
+    return ret;
 }
-static inline rb_node rb_red_parent(rb_node red)
-{
-    return (rb_node)red->__rb_parent_color;
-}
-static inline void rb_set_parent(rb_node rb, rb_node p)
-{
-    rb->__rb_parent_color = rb_color(rb) | (unsigned long)p;
-}
-static inline void rb_set_parent_color(rb_node rb, rb_node p, int color)
-{
-    rb->__rb_parent_color = (unsigned long)p | color;
-}
-static inline void __rb_change_child(rb_node old, rb_node new, rb_node parent,
-                                     rb_root root)
-{
-    if (parent) {
-        if (parent->rb_left == old)
-            parent->rb_left = new;
-        else
-            parent->rb_right = new;
-    } else
-        root->rb_node = new;
-}
-static inline void __rb_rotate_set_parents(rb_node old, rb_node new,
-                                           rb_root root, int color)
-{
-    rb_node parent = rb_parent(old);
-    new->__rb_parent_color = old->__rb_parent_color;
-    rb_set_parent_color(old, new, color);
-    __rb_change_child(old, new, parent, root);
-}
-static void __rb_insert_fix(rb_node node, rb_root root)
-{
-    rb_node parent = rb_red_parent(node), gparent, tmp;
-    while (1) {
-        if (!parent) {
-            rb_set_parent_color(node, NULL, RB_BLACK);
-            root->rb_node = node;
-            break;
-        } else if (rb_is_black(parent))
-            break;
 
-        gparent = rb_red_parent(parent);
-        tmp = gparent->rb_right;
-        if (parent != tmp) { /* parent == gparent->rb_left */
-            if (tmp && rb_is_red(tmp)) { /*Case 1,uncle is red*/
-                rb_set_parent_color(tmp, gparent, RB_BLACK);
-                rb_set_parent_color(parent, gparent, RB_BLACK);
-                node = gparent;
-                parent = rb_parent(node);
-                rb_set_parent_color(node, parent, RB_RED);
-                continue;
-            }
-            // Uncle is black
-            tmp = parent->rb_right;
-            if (node == tmp) { /*Case 2,node is right child,left rotate*/
-                parent->rb_right = tmp = node->rb_left;
-                if (tmp)
-                    rb_set_parent_color(tmp, parent, RB_BLACK);
-                node->rb_left = parent;
-                rb_set_parent_color(parent, node, RB_RED);
-                parent = node;
-                tmp = node->rb_right;
-            }
-            /*Case 3,can break*/
-            gparent->rb_left = tmp;
-            if (tmp)
-                rb_set_parent_color(tmp, gparent, RB_BLACK);
-            parent->rb_right = gparent;
-            __rb_rotate_set_parents(gparent, parent, root, RB_RED);
-            break;
-        } else {
-            tmp = gparent->rb_left;
-            if (tmp && rb_is_red(tmp)) { /*Case 1,uncle is red*/
-                rb_set_parent_color(tmp, gparent, RB_BLACK);
-                rb_set_parent_color(parent, gparent, RB_BLACK);
-                node = gparent;
-                parent = rb_parent(node);
-                rb_set_parent_color(node, parent, RB_RED);
-                continue;
-            }
-            // Uncle is black
-            tmp = parent->rb_left;
-            if (node == tmp) { /*Case 2,node is right child,left rotate*/
-                parent->rb_left = tmp = node->rb_right;
-                if (tmp)
-                    rb_set_parent_color(tmp, parent, RB_BLACK);
-                node->rb_right = parent;
-                rb_set_parent_color(parent, node, RB_RED);
-                parent = node;
-                tmp = node->rb_left;
-            }
-            /*Case 3,can break*/
-            gparent->rb_right = tmp;
-            if (tmp)
-                rb_set_parent_color(tmp, gparent, RB_BLACK);
-            parent->rb_left = gparent;
-            __rb_rotate_set_parents(gparent, parent, root, RB_RED);
-            break;
-        }
+int get_all_sem(Semaphore *sem)
+{
+    int ret = 0;
+    acquire_spinlock(&sem->lock);
+    if (sem->val > 0) {
+        ret = sem->val;
+        sem->val = 0;
     }
+    release_spinlock(&sem->lock);
+    return ret;
 }
-static rb_node __rb_erase(rb_node node, rb_root root)
+
+bool wait_sem(Semaphore *sem)
 {
-    rb_node child = node->rb_right, tmp = node->rb_left;
-    rb_node parent, rebalance;
-    unsigned long pc;
-    if (!tmp) {
-        pc = node->__rb_parent_color;
-        parent = __rb_parent(pc);
-        __rb_change_child(node, child, parent, root);
-        if (child) {
-            child->__rb_parent_color = pc;
-            rebalance = NULL;
-        } else
-            rebalance = __rb_is_black(pc) ? parent : NULL;
-    } else if (!child) {
-        tmp->__rb_parent_color = pc = node->__rb_parent_color;
-        parent = __rb_parent(pc);
-        __rb_change_child(node, tmp, parent, root);
-        rebalance = NULL;
-    } else {
-        rb_node successor = child, child2;
-        tmp = child->rb_left;
-        if (!tmp) {
-            parent = successor;
-            child2 = successor->rb_right;
-        } else {
-            do {
-                parent = successor;
-                successor = tmp;
-                tmp = tmp->rb_left;
-            } while (tmp);
-            parent->rb_left = child2 = successor->rb_right;
-            successor->rb_right = child;
-            rb_set_parent(child, successor);
-        }
-        successor->rb_left = tmp = node->rb_left;
-        rb_set_parent(tmp, successor);
-        pc = node->__rb_parent_color;
-        tmp = __rb_parent(pc);
-        __rb_change_child(node, successor, tmp, root);
-        if (child2) {
-            successor->__rb_parent_color = pc;
-            rb_set_parent_color(child2, parent, RB_BLACK);
-            rebalance = NULL;
-        } else {
-            unsigned long pc2 = successor->__rb_parent_color;
-            successor->__rb_parent_color = pc;
-            rebalance = __rb_is_black(pc2) ? parent : NULL;
-        }
+    acquire_spinlock(&sem->lock);
+    if (--sem->val >= 0) {
+        release_spinlock(&sem->lock);
+        return true;
     }
-    return rebalance;
-}
-static void __rb_erase_fix(rb_node parent, rb_root root)
-{
-    rb_node node = NULL, sibling, tmp1, tmp2;
-    while (1) {
-        sibling = parent->rb_right;
-        if (node != sibling) {
-            if (rb_is_red(sibling)) { /*Case 1,sibling is red*/
-                parent->rb_right = tmp1 = sibling->rb_left;
-                rb_set_parent_color(tmp1, parent, RB_BLACK);
-                sibling->rb_left = parent;
-                __rb_rotate_set_parents(parent, sibling, root, RB_RED);
-                sibling = tmp1;
-            }
-            tmp1 = sibling->rb_right;
-            if (!tmp1 || rb_is_black(tmp1)) {
-                tmp2 = sibling->rb_left;
-                if (!tmp2 ||
-                    rb_is_black(tmp2)) { /*Case 2,sibling black,ch1,ch2 black*/
-                    rb_set_parent_color(sibling, parent, RB_RED);
-                    if (rb_is_red(parent)) {
-                        rb_set_black(parent);
-                    } else {
-                        node = parent;
-                        parent = rb_parent(node);
-                        if (parent)
-                            continue;
-                    }
-                    break;
-                } else { /*Case 3*/
-                    sibling->rb_left = tmp1 = tmp2->rb_right;
-                    if (tmp1)
-                        rb_set_parent_color(tmp1, sibling, RB_BLACK);
-                    tmp2->rb_right = sibling;
-                    parent->rb_right = tmp2;
-                    tmp1 = sibling;
-                    sibling = tmp2;
-                }
-            }
-            parent->rb_right = tmp2 = sibling->rb_left;
-            if (tmp2)
-                rb_set_parent(tmp2, parent);
-            sibling->rb_left = parent;
-            rb_set_parent_color(tmp1, sibling, RB_BLACK);
-            __rb_rotate_set_parents(parent, sibling, root, RB_BLACK);
-            break;
-        } else {
-            sibling = parent->rb_left;
-            if (rb_is_red(sibling)) { /*Case 1,sibling is red*/
-                parent->rb_left = tmp1 = sibling->rb_right;
-                rb_set_parent_color(tmp1, parent, RB_BLACK);
-                sibling->rb_right = parent;
-                __rb_rotate_set_parents(parent, sibling, root, RB_RED);
-                sibling = tmp1;
-            }
-            tmp1 = sibling->rb_left;
-            if (!tmp1 || rb_is_black(tmp1)) {
-                tmp2 = sibling->rb_right;
-                if (!tmp2 ||
-                    rb_is_black(tmp2)) { /*Case 2,sibling black,ch1,ch2 black*/
-                    rb_set_parent_color(sibling, parent, RB_RED);
-                    if (rb_is_red(parent)) {
-                        rb_set_black(parent);
-                    } else {
-                        node = parent;
-                        parent = rb_parent(node);
-                        if (parent)
-                            continue;
-                    }
-                    break;
-                } else { /*Case 3*/
-                    sibling->rb_right = tmp1 = tmp2->rb_left;
-                    if (tmp1)
-                        rb_set_parent_color(tmp1, sibling, RB_BLACK);
-                    tmp2->rb_left = sibling;
-                    parent->rb_left = tmp2;
-                    tmp1 = sibling;
-                    sibling = tmp2;
-                }
-            }
-            parent->rb_left = tmp2 = sibling->rb_right;
-            if (tmp2)
-                rb_set_parent(tmp2, parent);
-            sibling->rb_right = parent;
-            rb_set_parent_color(tmp1, sibling, RB_BLACK);
-            __rb_rotate_set_parents(parent, sibling, root, RB_BLACK);
-            break;
-        }
+    WaitData *wait = kalloc(sizeof(WaitData));
+    wait->proc = thisproc();
+    wait->up = false;
+
+// #ifdef debug_sem
+//     printk("sem->sleeplist: %llx",(u64)&sem->sleeplist);
+// #endif
+// #ifdef debug_page_fault
+//     // printk("sem.c:54: proc's ptnode is %llx, ptnode.next is %llx, ptnode.prev is %llx\n", (u64)&p->ptnode, (u64)p->ptnode.next, (u64)p->ptnode.prev);
+//     // printk("sem.c:55: proc's pid id %d\n",p->pid);
+//     printk("sem->sleeplist: %llx\n",(u64)&sem->sleeplist);
+//     // printk("[START_PROC] Before insert, root_proc.children is %llx, root_proc.children.next is %llx, root_proc.children.prev is %llx\n", (u64)&root_proc.children, (u64)root_proc.children.next, (u64)root_proc.children.prev);
+// #endif
+    _insert_into_list(&sem->sleeplist, &wait->slnode);
+    acquire_sched_lock();
+    release_spinlock(&sem->lock);
+#ifdef debug_sched //{ UNUSED, RUNNABLE, RUNNING, SLEEPING, ZOMBIE };
+    printk("proc.c:224, cpuid is %lld\n",cpuid());
+#endif
+    sched(SLEEPING);
+    acquire_spinlock(&sem->lock); // also the lock for waitdata
+    if (!wait->up) // wakeup by other sources
+    {
+        ASSERT(++sem->val <= 0);
+        _detach_from_list(&wait->slnode);
     }
+    release_spinlock(&sem->lock);
+    bool ret = wait->up;
+    kfree(wait);
+    return ret;
 }
-int _rb_insert(rb_node node, rb_root rt,
-               bool (*cmp)(rb_node lnode, rb_node rnode))
+
+void post_sem(Semaphore *sem)
 {
-    rb_node nw = rt->rb_node, parent = NULL;
-    node->rb_left = node->rb_right = NULL;
-    node->__rb_parent_color = 0;
-    while (nw) {
-        parent = nw;
-        if (cmp(node, nw)) {
-            nw = nw->rb_left;
-            if (nw == NULL) {
-                parent->rb_left = node;
-                node->__rb_parent_color = (unsigned long)parent;
-            }
-        } else if (cmp(nw, node)) {
-            nw = nw->rb_right;
-            if (nw == NULL) {
-                parent->rb_right = node;
-                node->__rb_parent_color = (unsigned long)parent;
-            }
-        } else
-            return -1;
+    acquire_spinlock(&sem->lock);
+    if (++sem->val <= 0) {
+        ASSERT(!_empty_list(&sem->sleeplist));
+        auto wait = container_of(sem->sleeplist.prev, WaitData, slnode);
+        wait->up = true;
+        _detach_from_list(&wait->slnode);
+        activate_proc(wait->proc);
     }
-    __rb_insert_fix(node, rt);
-    return 0;
-}
-void _rb_erase(rb_node node, rb_root root)
-{
-    rb_node rebalance;
-    rebalance = __rb_erase(node, root);
-    if (rebalance)
-        __rb_erase_fix(rebalance, root);
-}
-rb_node _rb_lookup(rb_node node, rb_root rt,
-                   bool (*cmp)(rb_node lnode, rb_node rnode))
-{
-    rb_node nw = rt->rb_node;
-    while (nw) {
-        if (cmp(node, nw)) {
-            nw = nw->rb_left;
-        } else if (cmp(nw, node)) {
-            nw = nw->rb_right;
-        } else
-            return nw;
-    }
-    return NULL;
-}
-rb_node _rb_first(rb_root root)
-{
-    rb_node n;
-    n = root->rb_node;
-    if (!n)
-        return NULL;
-    while (n->rb_left)
-        n = n->rb_left;
-    return n;
+    release_spinlock(&sem->lock);
 }
 ================================================================================

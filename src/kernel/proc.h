@@ -43,6 +43,7 @@ typedef struct Proc {
     void *kstack;
     UserContext *ucontext;
     KernelContext *kcontext;
+    SpinLock lock;
 } Proc;
 
 void init_kproc();
