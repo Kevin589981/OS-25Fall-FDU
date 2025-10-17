@@ -97,7 +97,7 @@ void set_parent_to_this(Proc *proc)
     Proc *parent=thisproc();
     _detach_from_list(&proc->ptnode);
     proc->parent=parent;
-    _insert_into_list(&parent->children,&proc->ptnode);
+    _insert_into_list(parent->children.prev,&proc->ptnode);
     release_spinlock(&global_process_lock);
 }
 
@@ -110,7 +110,7 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
         
         p->parent=&root_proc;
         _detach_from_list(&p->ptnode);
-        _insert_into_list(&root_proc.children, &p->ptnode);
+        _insert_into_list(root_proc.children.prev, &p->ptnode);
         
     }
     
@@ -189,12 +189,12 @@ NO_RETURN void exit(int code)
     while (!_empty_list(&p->children)) {
         ListNode *child_node = p->children.next;
         _detach_from_list(child_node);
-        _insert_into_list(&orphaned_children, child_node);
+        _insert_into_list(orphaned_children.prev, child_node);
     }
     while (!_empty_list(&orphaned_children)) {
         ListNode *child_node = orphaned_children.next;
         _detach_from_list(child_node);
-        _insert_into_list(&root_proc.children, child_node);
+        _insert_into_list(root_proc.children.prev, child_node);
         Proc *child = container_of(child_node, Proc, ptnode);
         child->parent = &root_proc;
         if (is_zombie(child)) {
@@ -207,7 +207,7 @@ NO_RETURN void exit(int code)
     if (!p->parent){
         p->parent=&root_proc;
         _detach_from_list(&p->ptnode);
-        _insert_into_list(&root_proc.children, &p->ptnode);
+        _insert_into_list(root_proc.children.prev, &p->ptnode);
     }
 
     if ((u64)p->parent<0x20){
