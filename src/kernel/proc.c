@@ -29,11 +29,43 @@ int prio_to_weight[40]={
 }; 
 static int allocated_pid;
 
+typedef struct FreePidNode {
+    ListNode node;
+    int pid;
+} FreePidNode;
+
+static ListNode free_pid_list;
+
 void init_pid_allocator(){
     allocated_pid=0;
+    init_list_node(&free_pid_list);
+}
+
+void pid_recycler(int pid) {
+#ifdef PID_DEBUG
+    printk("recycle pid: %d\n", pid);
+#endif
+    FreePidNode *node = kalloc(sizeof(FreePidNode));
+    if (node == NULL) {
+        // 在内存不足的极端情况下，这个PID会丢失，但系统仍可运行
+        printk("WARNING: Failed to allocate memory for PID recycling.\n");
+        return;
+    }
+    node->pid = pid;
+    _insert_into_list(&free_pid_list, &node->node);
 }
 
 int pid_allocator(){
+
+    if (!_empty_list(&free_pid_list)) {
+        ListNode *node = free_pid_list.next;
+        _detach_from_list(node);
+        FreePidNode *fpn = container_of(node, FreePidNode, node);
+        int pid = fpn->pid;
+        kfree(fpn); // 释放节点本身占用的内存
+        return pid;
+    } 
+
     ++allocated_pid;
     return allocated_pid;
 }
@@ -158,6 +190,7 @@ int wait(int *exitcode)
                 *exitcode=zombie_child->exitcode;
             }
             int child_pid=zombie_child->pid;
+            pid_recycler(child_pid);
             if (zombie_child->kstack){
                 kfree_page(zombie_child->kstack);
             }
