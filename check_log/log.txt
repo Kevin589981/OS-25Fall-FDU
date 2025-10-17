@@ -1,0 +1,71 @@
+CPU 3: living
+CPU 2: living
+CPU 0: living
+CPU 3: living
+[ 12%] Built target test
+CPU 0: living
+[ 30%] Built target aarch64
+CPU 2: living
+CPU 1: living
+[ 51%] Built target common
+CPU 0: living
+CPU 3: living
+CPU 0: living
+[ 69%] Built target kernelx
+CPU 0: living
+CPU 1: living
+[ 82%] Built target driver
+CPU 3: living
+CPU 1: living
+[ 89%] Built target kernel8.elf
+CPU 2: living
+CPU 1: living
+CPU 3: living
+[ 97%] Built target kernel
+CPU 3: living
+CPU 0: living
+CPU 1: living
+CPU 2: living
+[100%] Built target image
+CPU 1: living
+CPU 0: living
+qemu-system-aarch64: terminating on signal 2
+qemu-system-aarch64: terminating on signal 2
+qemu-system-aarch64: terminating on signal 2
+qemu-system-aarch64:qemu-system-aarch64:  terminating on signal 2terminating on signal 2
+qemu-system-aarch64:
+qemu-system-aarch64:  terminating on signal 2terminating on signal 2
+
+qemu-system-aarch64: terminating on signal 2
+make[3]: *** [CMakeFiles/qemu.dir/build.make:85: CMakeFiles/qemu.dir/depend] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:209: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+qemu-system-aarch64: terminating on signal 2
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
+make[2]: *** [CMakeFiles/Makefile2:210: CMakeFiles/qemu.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt

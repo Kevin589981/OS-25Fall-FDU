@@ -11,9 +11,9 @@ bool is_zombie(Proc *);
 void release_sched_lock();
 void sched(enum procstate new_state);
 
-#define acquire_sched_lock() \
+#define acquire_sched_lock()  \
     do { \
-        acquire_spinlock_internal(&cpus[cpuid()].sched.lock, __FILE__, __LINE__); \
+        acquire_spinlock_internal(&global_sched_lock, __FILE__, __LINE__);\
     } while (0)
 
 // MUST call lock_for_sched() before sched() !!!

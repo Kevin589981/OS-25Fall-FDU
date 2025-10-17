@@ -64,7 +64,7 @@ void init_sched()
     
     for (int i = 0; i < NCPU; i++) {
         struct sched *s = &cpus[i].sched;
-        init_spinlock(&s->lock);
+        // init_spinlock(&s->lock); // Per-CPU锁已被移除
         // 初始化红黑树
         s->run_queue.rb_node = NULL;
         s->task_count = 0;
@@ -91,62 +91,60 @@ void init_schinfo(struct schinfo *p)
 
 // void acquire_sched_lock()
 // {
-//     acquire_spinlock(&cpus[cpuid()].sched.lock);
+//     acquire_spinlock(&global_sched_lock);
 // }
 
 void release_sched_lock()
 {
-    release_spinlock(&cpus[cpuid()].sched.lock);
+    release_spinlock(&global_sched_lock);
 }
 
 bool is_zombie(Proc *p)
 {
     bool r;
-    acquire_spinlock(&p->lock);
-    // acquire_spinlock(&global_sched_lock);
+    // acquire_spinlock(&p->lock);
+    acquire_sched_lock();
     r = p->state == ZOMBIE;
-    // release_spinlock(&global_sched_lock);
-    release_spinlock(&p->lock);
+    // release_spinlock(&p->lock);
+    release_sched_lock();
     return r;
 }
 
 bool activate_proc(Proc *p)
-{
+{   
+
+    acquire_sched_lock(); 
     if (p->state == RUNNING || p->state == RUNNABLE) {
+        release_sched_lock(); 
         return true;
     }
     
     if (p->state == SLEEPING || p->state == UNUSED) {
+        // 使用全局锁保护所有CPU的调度队列
+
         // 选择任务数最少的CPU
         int target_cpu = 0;
-        // u64 min_count = cpus[0].sched.task_count;
+        u64 min_count = cpus[0].sched.task_count;
         
-        // for (int i = 1; i < NCPU; i++) {
-        //     if (cpus[i].sched.task_count < min_count) {
-        //         min_count = cpus[i].sched.task_count;
-        //         target_cpu = i;
-        //     }
-        // }
-        for (int i=cpuid();i>=0;i=(i+1)%4)
-        {
-            target_cpu=i;
-            if (!try_acquire_spinlock(&cpus[target_cpu].sched.lock)){
-                continue;
+        for (int i = 1; i < NCPU; i++) {
+            if (cpus[i].sched.task_count < min_count) {
+                min_count = cpus[i].sched.task_count;
+                target_cpu = i;
             }
-        
-            // 新进程的vruntime设置为当前最小vruntime，避免饥饿
-            p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime;
-            p->state = RUNNABLE;
-        
-            // 插入红黑树
-            _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
-            cpus[target_cpu].sched.task_count++;
-        
-            release_spinlock(&cpus[target_cpu].sched.lock);
-            return true;
         }
-    }
     
+        // 新进程的vruntime设置为目标CPU的最小vruntime，避免饥饿
+        p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime;
+        p->state = RUNNABLE;
+    
+        // 插入红黑树
+        _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
+        cpus[target_cpu].sched.task_count++;
+    
+        release_sched_lock(); // 释放全局锁
+        return true;
+    }
+    printk("activate_proc: invalid process state\n");
     PANIC();
     return false;
 }
@@ -218,24 +216,19 @@ static Proc *pick_next()
     if (leftmost) {
         next_proc = container_of(leftmost, Proc, schinfo.node);
         _rb_erase(leftmost, my_queue);
-        // cpus[my_cpu].sched.task_count--; // 注意：这里的task_count不应该减少，因为进程马上要被执行，它仍然是这个CPU的任务
+        // task_count不减少，因为进程马上要被执行，它仍然是这个CPU的任务
         return next_proc;
     }
     
     // 当前队列为空，尝试工作窃取
-    // 注意：此时持有 my_cpu 的锁
+    // 注意：此时已持有全局调度锁
     
     Proc *stolen = NULL;
     for (int i = 0; i < NCPU; i++) {
-        int target_cpu_id = (my_cpu + i + 1) % NCPU; // 从下一个CPU开始遍历，避免总从CPU0偷
+        int target_cpu_id = (my_cpu + i + 1) % NCPU; // 从下一个CPU开始遍历
         if (target_cpu_id == my_cpu) continue;
     
-        // 尝试获取目标CPU的锁，如果获取不到就跳过，避免死锁和长时间等待
-        if (!try_acquire_spinlock(&cpus[target_cpu_id].sched.lock)) {
-            continue;
-        }
-
-        // ---- 在这里执行窃取逻辑 ----
+        // 已持有全局锁，可以直接安全地访问其他CPU的队列
         struct rb_root_ *other_queue = &cpus[target_cpu_id].sched.run_queue;
         if (cpus[target_cpu_id].sched.task_count > 0) {
             struct rb_node_ *leftmost_other = _rb_first(other_queue);
@@ -243,15 +236,8 @@ static Proc *pick_next()
                 stolen = container_of(leftmost_other, Proc, schinfo.node);
                 _rb_erase(leftmost_other, other_queue);
                 cpus[target_cpu_id].sched.task_count--;
+                break; // 窃取成功，退出循环
             }
-        }
-        // ---------------------------
-    
-        release_spinlock(&cpus[target_cpu_id].sched.lock);
-    
-        // 如果窃取成功，就退出循环
-        if (stolen) {
-            break;
         }
     }
     
@@ -267,9 +253,9 @@ static Proc *pick_next()
     }
     
     // 如果循环结束都没有偷到，直接返回idle
-    // 此时 my_cpu 的锁仍然被持有
     return cpus[my_cpu].sched.idle;
 }
+
 
 static void update_this_proc(Proc *p)
 {
@@ -278,9 +264,13 @@ static void update_this_proc(Proc *p)
 
 void sched(enum procstate new_state)
 {
+    // 进入调度器，不加全局锁
+    // acquire_sched_lock();
+
     auto this = thisproc();
     if (this->pid==1 && new_state==ZOMBIE){
         printk("init proc is dying\n");
+        PANIC();
     }
 #ifdef debug_sched
     printk("this cpu is %lld, process's pid is %d, state is %d\n", 
@@ -289,7 +279,7 @@ void sched(enum procstate new_state)
     ASSERT(this->state == RUNNING);
     
     update_this_state(new_state);
-    // post_sem(&this->parent->childexit);
+    
     auto next = pick_next();
     update_this_proc(next);
     
@@ -301,35 +291,28 @@ void sched(enum procstate new_state)
     
     next->state = RUNNING;
     next->schinfo.start_exec_time = get_timestamp();
-    // if (new_state==DYING){
-    //     cpus[cpuid()].zombie_to_reap=this;
-    // }
+    
     if (next != this) {
-        *cpus[cpuid()].zombie_to_reap=*this->kcontext;
-        auto old_ctx = &cpus[cpuid()].zombie_to_reap; //写到一个专门的无用页面上
+        // *cpus[cpuid()].zombie_to_reap=*this->kcontext;
+        // auto old_ctx = &cpus[cpuid()].zombie_to_reap; //写到一个专门的无用页面上
         
-        if (new_state!=ZOMBIE){
-            old_ctx = &this->kcontext;
-        }else {
-            release_spinlock(&this->lock);
-        }
+        // if (new_state!=ZOMBIE){
+           auto old_ctx = &this->kcontext;
+        // }else {
+            // 如果进程将要变为ZOMBIE，必须释放它自己的锁，
+            // 以便父进程可以在wait()中访问它
+            // release_spinlock(&this->lock);
+        // }
         swtch(next->kcontext, old_ctx);
     }
+
+    // 从swtch返回后（即当前进程被重新调度），释放全局调度锁
     release_sched_lock();
-
-    // if (cpus[cpuid()].zombie_to_reap){
-    //     // acquire_spinlock(&global_sched_lock);
-    //     Proc *p=cpus[cpuid()].zombie_to_reap;
-    //     cpus[cpuid()].zombie_to_reap=NULL;
-    //     p->state=ZOMBIE;
-    //     post_sem(&p->parent->childexit);
-    //     // release_spinlock(&global_sched_lock);
-    // }
-
 }
 
 u64 proc_entry(void (*entry)(u64), u64 arg)
 {
+    // 新启动的进程继承了调度器的锁，需要在这里释放
     release_sched_lock();
     set_return_addr(entry);
     return arg;
