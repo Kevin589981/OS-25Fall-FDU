@@ -13,4 +13,4 @@
     #define DEBUG_PRINTK(fmt, ...) do {} while (0)
 #endif
 
-// #define DEBUG_SPINLOCK 1
+#define DEBUG_SPINLOCK 1

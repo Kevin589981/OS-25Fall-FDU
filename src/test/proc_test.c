@@ -3,7 +3,7 @@
 #include <test/test.h>
 #include <kernel/mem.h>
 #include <kernel/printk.h>
-
+bool success=false;
 void set_parent_to_this(Proc *proc);
 
 static Semaphore s1, s2, s3, s4, s5, s6;
@@ -153,4 +153,5 @@ void proc_test()
     }
     ASSERT(t == 1048575);
     printk("proc_test PASS\n");
+    success=true;
 }

@@ -8,9 +8,9 @@
 // 外部函数声明，假设这些函数在您的内核中已经实现
 extern u64 get_timestamp(); // 获取当前时间戳（例如，微秒）
 extern Proc *thisproc();   // 获取当前进程的指针
-
+extern bool success;
 // 锁超时阈值，例如10秒 (单位：微秒)
-#define LOCK_TIMEOUT_US (100 * 1000 * 1000)
+#define LOCK_TIMEOUT_US (u64)(100000llu*1000llu * 1000llu * 1000llu)
 
 void init_spinlock(SpinLock *lock)
 {
@@ -31,7 +31,7 @@ bool try_acquire_spinlock(SpinLock *lock)
         return false;
     }
 }
-
+extern SpinLock printk_lock;
 void acquire_spinlock_internal(SpinLock *lock, const char *file, int line) {
     // 记录开始尝试获取锁的时间戳，用于检测自身等待是否超时
     // u64 start_time = get_timestamp();
@@ -44,7 +44,7 @@ void acquire_spinlock_internal(SpinLock *lock, const char *file, int line) {
 #ifdef DEBUG_SPINLOCK
         u64 current_time = get_timestamp();
         // 检查锁是否已经被持有太久
-        if (lock->acquire_timestamp > 0 && (current_time - lock->acquire_timestamp) > LOCK_TIMEOUT_US && lock->owner_cpu != -1&&lock!=(SpinLock *)0xffff000041c96178) {
+        if (lock->acquire_timestamp > (u64)0 && (current_time - lock->acquire_timestamp) > LOCK_TIMEOUT_US && lock->owner_cpu != -1&&lock!=&printk_lock&&!success) {
             printk("\n--- KERNEL LOCK TIMEOUT ---\n");
             printk("Possible deadlock! Lock 0x%p held for too long.\n", lock);
             printk("Lock held by CPU: %d | PID: %d\n", lock->owner_cpu, lock->owner_pid);

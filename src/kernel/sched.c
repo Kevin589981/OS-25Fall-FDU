@@ -48,7 +48,7 @@ void create_idle_proc()
         
         void *sp = (void *)p->kstack + PAGE_SIZE;
         p->kcontext = (KernelContext *)(sp - sizeof(KernelContext));
-        p->kcontext->lr = (u64)proc_entry;
+        p->kcontext->lr = (u64)&proc_entry;
         p->kcontext->x0 = (u64)idle_entry;
         p->kcontext->x1 = (u64)0;
         cpus[i].sched.current_proc = p;
@@ -116,7 +116,7 @@ bool activate_proc(Proc *p)
     acquire_sched_lock(); 
     if (p->state == RUNNING || p->state == RUNNABLE) {
         release_sched_lock(); 
-        return true;
+        return false;
     }
     
     if (p->state == SLEEPING || p->state == UNUSED) {
@@ -144,6 +144,7 @@ bool activate_proc(Proc *p)
         release_sched_lock(); // 释放全局锁
         return true;
     }
+    release_sched_lock();
     printk("activate_proc: invalid process state\n");
     PANIC();
     return false;
@@ -174,6 +175,7 @@ static void update_this_state(enum procstate new_state)
 {
     Proc *this = thisproc();
     if (this->idle) {
+        this->state = new_state;
         return;
     }
     
@@ -266,10 +268,10 @@ void sched(enum procstate new_state)
 {
     // 进入调度器，不加全局锁
     // acquire_sched_lock();
-
+    ASSERT(global_sched_lock.locked==1);
     auto this = thisproc();
     if (this->pid==1 && new_state==ZOMBIE){
-        printk("init proc is dying\n");
+        printk("root proc is dying\n");
         PANIC();
     }
 #ifdef debug_sched
@@ -281,14 +283,15 @@ void sched(enum procstate new_state)
     update_this_state(new_state);
     
     auto next = pick_next();
-    update_this_proc(next);
     
+    update_this_proc(next);
     if (next->state != RUNNABLE && !next->idle) {
         printk("This proc is: %d, it is %d\n", this->pid, this->state);
         printk("Next proc is: %d, it is %d\n", next->pid, next->state);
     }
-    ASSERT(next->state == RUNNABLE || next->idle);
+    ASSERT(next->state == RUNNABLE);
     
+
     next->state = RUNNING;
     next->schinfo.start_exec_time = get_timestamp();
     

@@ -53,10 +53,9 @@ void init_kproc()
 }
 
 void init_proc(Proc *p)
-{
+{   
+    acquire_spinlock(&global_process_lock);
     memset(p, 0, sizeof(Proc));
-
-    // acquire_spinlock(&global_process_lock);
 
     init_sem(&p->childexit, 1);
     init_list_node(&p->children);
@@ -79,7 +78,7 @@ void init_proc(Proc *p)
     p->kcontext = (KernelContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(KernelContext));
     p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(KernelContext) - sizeof(UserContext));
 
-    // release_spinlock(&global_process_lock);
+    release_spinlock(&global_process_lock);
 }
 
 Proc *create_proc()
@@ -106,15 +105,16 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
 {
     // TODO:
     // 1. set the parent to root_proc if NULL
+    acquire_spinlock(&global_process_lock);
     if (p->parent==NULL){
-        acquire_spinlock(&global_process_lock);
+        
         p->parent=&root_proc;
         _detach_from_list(&p->ptnode);
         _insert_into_list(&root_proc.children, &p->ptnode);
-        release_spinlock(&global_process_lock);
+        
     }
     
-    p->kcontext->lr=(u64)proc_entry;
+    p->kcontext->lr=(u64)&proc_entry;
     p->kcontext->x0=(u64)entry;
     p->kcontext->x1=(u64)arg;
     
@@ -123,6 +123,7 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
     activate_proc(p);//activate函数内部有锁
     // NOTE: be careful of concurrency
     printk("cpuid: %lld, start pid: %d, its parent is %d\n",cpuid(),p->pid,p->parent->pid);
+    release_spinlock(&global_process_lock);
     return id;
 }
 
@@ -173,10 +174,10 @@ int wait(int *exitcode)
 
 NO_RETURN void exit(int code)
 {
-    Proc *p=thisproc();
+    
      
     acquire_spinlock(&global_process_lock);
-
+    Proc *p=thisproc();
 #ifdef debug_sched
     printk("proc.c:224, p->state is %d\n",p->state);
 #endif
@@ -211,16 +212,18 @@ NO_RETURN void exit(int code)
 
     if ((u64)p->parent<0x20){
         printk("BUG at proc.c :325\n");
+        PANIC();
     }
+    
     post_sem(&p->parent->childexit);
 
     // 不在此处获取调度锁，sched()函数会自己处理
     acquire_sched_lock(); 
+    
     // acquire_spinlock(&p->lock);
 
-
-    
     release_spinlock(&global_process_lock);
+    
     // printk("Ready to Enter zombie, Proc %d, cpu %lld\n",p->pid,cpuid());
     sched(ZOMBIE);
     printk("exit: sched(ZOMBIE) should not return");
