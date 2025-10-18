@@ -154,7 +154,9 @@ int start_proc(Proc *p, void (*entry)(u64), u64 arg)
     int id =p->pid;
     activate_proc(p);//activate函数内部有锁
     // NOTE: be careful of concurrency
+#ifdef PID_DEBUG
     printk("cpuid: %lld, start pid: %d, its parent is %d\n",cpuid(),p->pid,p->parent->pid);
+#endif
     release_spinlock(&global_process_lock);
     return id;
 }
@@ -168,7 +170,9 @@ int wait(int *exitcode)
         bool has_children = !_empty_list(&parent->children);
         if (!has_children){
             release_spinlock(&global_process_lock);
+#ifdef PID_DEBUG
             printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
+#endif
             return -1;
         }
 
@@ -180,7 +184,9 @@ int wait(int *exitcode)
             Proc *p = container_of(node, Proc, ptnode);
             if (is_zombie(p)) {
                 zombie_child = p;
+#ifdef PID_DEBUG
                 printk("Found zombie child pid: %d\n", p->pid);
+#endif
                 break;
             }
         }
