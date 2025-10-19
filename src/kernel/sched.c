@@ -43,14 +43,18 @@ void create_idle_proc()
         p->state = RUNNING;
         p->idle = TRUE;
         p->pid = -1 - i;
-        p->kstack = kalloc_page();
+        // p->kstack = kalloc_page();
+        p->kstack = NULL;
         p->parent = NULL;
         
-        void *sp = (void *)p->kstack + PAGE_SIZE;
-        p->kcontext = (KernelContext *)(sp - sizeof(KernelContext));
-        p->kcontext->lr = (u64)&proc_entry;
-        p->kcontext->x0 = (u64)idle_entry;
-        p->kcontext->x1 = (u64)0;
+        // void *sp = (void *)p->kstack + PAGE_SIZE;
+        // p->kcontext = (KernelContext *)(sp - sizeof(KernelContext));
+        // p->kcontext->lr = (u64)&proc_entry;
+        // p->kcontext->x0 = (u64)idle_entry;
+        // p->kcontext->x1 = (u64)0;
+        p->ucontext = NULL;
+        p->kcontext = NULL;
+
         cpus[i].sched.current_proc = p;
         cpus[i].sched.idle = p;
     }
