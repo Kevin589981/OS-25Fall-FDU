@@ -46,6 +46,15 @@ bool is_zombie(Proc *p)
     return r;
 }
 
+bool is_unused(Proc *p)
+{
+    bool r;
+    acquire_sched_lock();
+    r = p->state == UNUSED;
+    release_sched_lock();
+    return r;
+}
+
 bool activate_proc(Proc *p)
 {
     // TODO:
@@ -85,6 +94,7 @@ void sched(enum procstate new_state)
     ASSERT(next->state == RUNNABLE);
     next->state = RUNNING;
     if (next != this) {
+        attach_pgdir(&next->pgdir);
         swtch(next->kcontext, &this->kcontext);
     }
     release_sched_lock();
