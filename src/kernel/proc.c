@@ -27,48 +27,73 @@ int prio_to_weight[40]={
     /*  10 */       110,        87,        70,        56,        45,
     /*  15 */        36,        29,        23,        18,        15,
 }; 
-static int allocated_pid;
 
-typedef struct FreePidNode {
-    ListNode node;
-    int pid;
-} FreePidNode;
+unsigned long pid_bitmap[BITMAP_SIZE];
 
-static ListNode free_pid_list;
+// 用于记录下一次开始搜索空闲PID的位置，以提高效率
+static int next_pid_to_check = 0;
 
-void init_pid_allocator(){
-    allocated_pid=0;
-    init_list_node(&free_pid_list);
+// 初始化PID分配器
+void init_pid_allocator() {
+    // 初始化位图，将所有位清零，表示所有PID都未被分配
+    memset(pid_bitmap, 0, sizeof(pid_bitmap));
+    next_pid_to_check = 0;
+    // 保留PID 0
+    set_bit(0, pid_bitmap);
 }
 
+// 回收一个PID
 void pid_recycler(int pid) {
-#ifdef PID_DEBUG
-    printk("recycle pid: %d\n", pid);
-#endif
-    FreePidNode *node = kalloc(sizeof(FreePidNode));
-    if (node == NULL) {
-        // 在内存不足的极端情况下，这个PID会丢失，但系统仍可运行
-        printk("WARNING: Failed to allocate memory for PID recycling.\n");
+    if (pid < 0 || pid >= MAX_PID) {
+        printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
         return;
     }
-    node->pid = pid;
-    _insert_into_list(&free_pid_list, &node->node);
+
+#ifdef PID_DEBUG
+    printk("Recycling PID: %d\n", pid);
+#endif
+
+    // 使用原子操作或在锁保护下清除对应位
+    // 这里我们假设它会在 global_process_lock 的保护下被调用
+    int index = pid / BITS_PER_LONG;
+    int offset = pid % BITS_PER_LONG;
+    pid_bitmap[index] &= ~(1UL << offset);
 }
 
-int pid_allocator(){
+// 分配一个PID
+int pid_allocator() {
+    // 假设此函数总是在 global_process_lock 保护下调用
+    
+    // 从上次检查的位置开始循环查找
+    for (int i = 0; i < MAX_PID; ++i) {
+        int pid = (next_pid_to_check + i) % MAX_PID;
+        if (pid == 0) continue; // 跳过PID 0
 
-    if (!_empty_list(&free_pid_list)) {
-        ListNode *node = free_pid_list.next;
-        _detach_from_list(node);
-        FreePidNode *fpn = container_of(node, FreePidNode, node);
-        int pid = fpn->pid;
-        kfree(fpn); // 释放节点本身占用的内存
-        return pid;
-    } 
+        int index = pid / BITS_PER_LONG;
+        int offset = pid % BITS_PER_LONG;
 
-    ++allocated_pid;
-    return allocated_pid;
+        // 检查该位是否为0 (未被占用)
+        if (!(pid_bitmap[index] & (1UL << offset))) {
+            // 标记该位为1 (已占用)
+            pid_bitmap[index] |= (1UL << offset);
+            
+            // 更新下一次开始搜索的位置
+            next_pid_to_check = pid + 1;
+            if (next_pid_to_check >= MAX_PID) {
+                next_pid_to_check = 1; // 回到开头
+            }
+            
+            return pid;
+        }
+    }
+
+    // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
+    return -1; // 返回错误码
 }
+
+
+
+
 
 Proc idle_procs[NCPU];
 
@@ -97,6 +122,12 @@ void init_proc(Proc *p)
     p->killed = FALSE;
     p->parent = NULL;
     p->pid = pid_allocator();
+    if (p->pid==-1){
+        kfree(p);
+        release_spinlock(&global_process_lock);
+        printk("PID used out\n");
+        PANIC();
+    }
     p->state = UNUSED;
     p->kstack = kalloc_page();
     init_spinlock(&p->lock);

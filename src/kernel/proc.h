@@ -55,3 +55,10 @@ int start_proc(Proc *, void (*entry)(u64), u64 arg);
 NO_RETURN void exit(int code);
 int wait(int *exitcode);
 int kill(int pid);
+
+#define MAX_PID 4096 // 定义系统支持的最大PID数量，可以根据需求调整
+#define BITS_PER_LONG (sizeof(unsigned long) * 8)
+#define BITMAP_SIZE (MAX_PID / BITS_PER_LONG)
+
+// 全局PID位图
+extern unsigned long pid_bitmap[BITMAP_SIZE];

@@ -141,7 +141,7 @@ bool activate_proc(Proc *p)
         return false;
     }
     
-    if (p->state == SLEEPING || p->state == UNUSED) {
+    else if (p->state == SLEEPING || p->state == UNUSED) {
         // 使用全局锁保护所有CPU的调度队列
 
         // 选择任务数最少的CPU
@@ -165,7 +165,11 @@ bool activate_proc(Proc *p)
     
         release_sched_lock(); // 释放全局锁
         return true;
+    }else if (p->state==ZOMBIE){
+        release_sched_lock();
+        return false;
     }
+
     release_sched_lock();
     printk("activate_proc: invalid process state\n");
     PANIC();
