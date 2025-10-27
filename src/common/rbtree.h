@@ -20,3 +20,4 @@ void _rb_erase(rb_node node, rb_root root);
 rb_node _rb_lookup(rb_node node, rb_root rt,
                    bool (*cmp)(rb_node lnode, rb_node rnode));
 rb_node _rb_first(rb_root root);
+rb_node rb_next(rb_node node);

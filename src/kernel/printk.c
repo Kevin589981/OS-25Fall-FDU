@@ -2,8 +2,8 @@
 #include <common/spinlock.h>
 #include <kernel/printk.h>
 
-static SpinLock printk_lock;
-
+// static SpinLock printk_lock;
+SpinLock printk_lock;
 void printk_init()
 {
     init_spinlock(&printk_lock);
