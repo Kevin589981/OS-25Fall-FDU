@@ -221,9 +221,9 @@ static void update_this_state(enum procstate new_state)
     if (new_state == RUNNABLE) {
         // RUNNING -> RUNNABLE: 插入红黑树
         _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
-    } else if (new_state == SLEEPING || new_state == ZOMBIE||new_state==DYING) {
+    } else if (new_state == SLEEPING || new_state == ZOMBIE) {
         // 从RUNNING变为SLEEPING/ZOMBIE，不需要操作红黑树（因为本来就不在树中）
-        if (new_state == ZOMBIE||new_state==DYING) {
+        if (new_state == ZOMBIE) {
             cpus[my_cpu].sched.task_count--;
         }
     }
