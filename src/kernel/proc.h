@@ -9,6 +9,7 @@
 enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, ZOMBIE };
 
 typedef struct UserContext {
+    u64 sp, useless;
     u64 spsr, elr;
     u64 x[18];
 } UserContext;

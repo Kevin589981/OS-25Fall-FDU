@@ -123,14 +123,14 @@ bool is_unused(Proc *p)
     return r;
 }
 
-bool is_unused(Proc *p)
-{
-    bool r;
-    acquire_sched_lock();
-    r = p->state == UNUSED;
-    release_sched_lock();
-    return r;
-}
+// bool is_unused(Proc *p)
+// {
+//     bool r;
+//     acquire_sched_lock();
+//     r = p->state == UNUSED;
+//     release_sched_lock();
+//     return r;
+// }
 
 bool activate_proc(Proc *p)
 {   
@@ -296,14 +296,19 @@ void sched(enum procstate new_state)
     // acquire_sched_lock();
     ASSERT(global_sched_lock.locked==1);
     auto this = thisproc();
-    if (this->pid==1 && new_state==ZOMBIE){
-        printk("root proc is dying\n");
-        PANIC();
-    }
+    // if (this->pid==1 && new_state==ZOMBIE){
+    //     printk("root proc is dying\n");
+    //     PANIC();
+    // }
 #ifdef debug_sched
     printk("this cpu is %lld, process's pid is %d, state is %d\n", 
            cpuid(), this->pid, this->state);
 #endif
+    if (this->killed && new_state!=ZOMBIE){
+        release_sched_lock();
+        return;
+    }
+    
     ASSERT(this->state == RUNNING);
     
     update_this_state(new_state);

@@ -39,7 +39,7 @@ void init_pid_allocator() {
     memset(pid_bitmap, 0, sizeof(pid_bitmap));
     next_pid_to_check = 0;
     // 保留PID 0
-    set_bit(0, pid_bitmap);
+    // set_bit(0, pid_bitmap);
 }
 
 // 回收一个PID
@@ -128,6 +128,7 @@ void init_proc(Proc *p)
         printk("PID used out\n");
         PANIC();
     }
+    init_pgdir(&p->pgdir);
     p->state = UNUSED;
     p->kstack = kalloc_page();
     init_spinlock(&p->lock);
@@ -291,7 +292,7 @@ NO_RETURN void exit(int code)
         printk("BUG at proc.c :325\n");
         PANIC();
     }
-    
+    free_pgdir(&p->pgdir);
     post_sem(&p->parent->childexit);
 
     // 不在此处获取调度锁，sched()函数会自己处理
@@ -307,10 +308,35 @@ NO_RETURN void exit(int code)
     PANIC();
 }
 
+Proc *find_to_kill(int pid, Proc *parent){
+    if (parent->pid==pid){
+        if (parent->state==UNUSED){
+            return NULL;
+        }
+        return parent;
+    }
+    _for_in_list(node,&parent->children){
+        Proc *child=container_of(node, Proc, ptnode);
+        Proc *find=find_to_kill(pid, child);
+        if (find) return find;
+    }
+    return NULL;
+}
+
 int kill(int pid)
 {
     // TODO:
     // Set the killed flag of the proc to true and return 0.
     // Return -1 if the pid is invalid (proc not found).
-
+    acquire_spinlock(&global_process_lock);
+    Proc *target=find_to_kill(pid,&root_proc);
+    if (!target){
+        release_spinlock(&global_process_lock);
+        return -1;
+    }
+    target->killed=true;
+    activate_proc(target);
+    release_spinlock(&global_process_lock);
+    
+    return 0;
 }
