@@ -205,7 +205,7 @@ void init_sched()
         s->task_count = 0;
         s->min_vruntime = 0;
         s->queue_weight = 0; // 修改：初始化queue_weight
-        cpus[i].zombie_to_reap = kalloc(sizeof(KernelContext));
+        // cpus[i].zombie_to_reap = kalloc(sizeof(KernelContext));
         
         memset(&sched_timers[i], 0, sizeof(struct timer));
         sched_timers[i].elapse = SCHED_TIMESLICE_MS;

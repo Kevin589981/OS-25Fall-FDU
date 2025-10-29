@@ -24,7 +24,7 @@ struct cpu {
     bool online;
     struct rb_root_ timer;
     struct sched sched;
-    KernelContext *zombie_to_reap;
+    // KernelContext *zombie_to_reap;
 };
 
 extern SpinLock global_sched_lock;
