@@ -15,6 +15,9 @@ void *syscall_table[NR_SYSCALL] = {
 
 void syscall_entry(UserContext *context)
 {
+#ifdef lab3_debug1
+    printk("syscall.c:18 \n");
+#endif
     // TODO
     // Invoke syscall_table[id] with args and set the return value.
     // id is stored in x8. args are stored in x0-x5. return value is stored in x0.

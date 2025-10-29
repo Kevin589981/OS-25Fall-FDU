@@ -10,7 +10,12 @@ void trap_global_handler(UserContext *context)
 {
 
     thisproc()->ucontext = context;
-
+#ifdef lab3_debug1
+    if (thisproc()->pid==2){
+        printk("It's ucontext sp:%llx, useless:%llx\n, elr:%llx, spsr:%llx\n",context->sp,context->useless,context->elr,context->spsr);
+        printk("%llx %llx %llx %llx\n",context->x[0],context->x[1],context->x[2],context->x[3]);
+    }
+#endif
     u64 esr = arch_get_esr();
     u64 ec = esr >> ESR_EC_SHIFT;
     u64 iss = esr & ESR_ISS_MASK;

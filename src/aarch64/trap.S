@@ -25,6 +25,7 @@ bl trap_global_handler
 .global trap_return
 trap_return:
 // TODO: restore UserContext
+
 popp(x0, x1)       // x0 = sp_el0, x1 = 0 (来自xzr)
 msr sp_el0, x0     // 恢复用户栈指针
 popp(x0,x1)

@@ -45,6 +45,9 @@ static Semaphore myrepot_done;
 
 u64 syscall_myreport(u64 id)
 {
+#ifdef lab3_debug1
+    printk("user_proc_test.c:48\n");
+#endif
     static bool stop;
     ASSERT(id < 22);
     if (stop)
@@ -76,13 +79,20 @@ void user_proc_test()
         // 1. set x0 = i
         // 2. set elr = EXTMEM
         // 3. set spsr = 0
+        #define USER_STACK_VA (1UL << 39)
+
+        void *user_stack = kalloc_page();
+        *get_pte(&p->pgdir, USER_STACK_VA - PAGE_SIZE, true) = K2P(user_stack) | PTE_USER_DATA;
+
         p->ucontext->x[0]=i;
         p->ucontext->elr=EXTMEM;
         p->ucontext->spsr=0;
+        p->ucontext->sp = USER_STACK_VA-16;
         
         pids[i] = start_proc(p, trap_return, 0);
         printk("pid[%d] = %d\n", i, pids[i]);
     }
+    printk("user_proc_test.c:91\n");
     ASSERT(wait_sem(&myrepot_done));
     printk("done\n");
     for (int i = 0; i < 22; i++)

@@ -138,9 +138,9 @@ void init_proc(Proc *p)
         PANIC();
     }
     memset(p->kstack, 0, PAGE_SIZE);
-
-    p->kcontext = (KernelContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(KernelContext));
-    p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(KernelContext) - sizeof(UserContext));
+    p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext));
+    p->kcontext = (KernelContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext)- sizeof(KernelContext));
+    
 
     release_spinlock(&global_process_lock);
 }
@@ -282,6 +282,7 @@ NO_RETURN void exit(int code)
             post_sem(&root_proc.childexit);
         }
     }
+    ASSERT(p->parent!=NULL);
     if (!p->parent){
         p->parent=&root_proc;
         _detach_from_list(&p->ptnode);
@@ -316,6 +317,7 @@ Proc *find_to_kill(int pid, Proc *parent){
         return parent;
     }
     _for_in_list(node,&parent->children){
+        if (node==&parent->children)continue;
         Proc *child=container_of(node, Proc, ptnode);
         Proc *find=find_to_kill(pid, child);
         if (find) return find;
@@ -329,7 +331,9 @@ int kill(int pid)
     // Set the killed flag of the proc to true and return 0.
     // Return -1 if the pid is invalid (proc not found).
     acquire_spinlock(&global_process_lock);
-    Proc *target=find_to_kill(pid,&root_proc);
+    printk("try to kill %d\n",pid);
+    Proc *target=find_to_kill(pid, &root_proc);
+    printk("find kill target %d\n",pid);
     if (!target){
         release_spinlock(&global_process_lock);
         return -1;

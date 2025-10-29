@@ -167,6 +167,7 @@ bool activate_proc(Proc *p)
         return true;
     }else if (p->state==ZOMBIE){
         release_sched_lock();
+        printk("activate zombie proc %d\n",p->pid);
         return false;
     }
 
@@ -295,7 +296,9 @@ void sched(enum procstate new_state)
     // 进入调度器，不加全局锁
     // acquire_sched_lock();
     ASSERT(global_sched_lock.locked==1);
+    
     auto this = thisproc();
+    // if (this->pid>0) printk("sched.c:300, pid: %d,\n old state: %d,new state: %d\n",this->pid, this->state, new_state);
     // if (this->pid==1 && new_state==ZOMBIE){
     //     printk("root proc is dying\n");
     //     PANIC();
@@ -328,17 +331,63 @@ void sched(enum procstate new_state)
     
     if (next != this) {
         attach_pgdir(&next->pgdir);
+        if (next->pid>1){
+            printk("sched.c:335\n");
+        }
         swtch(next->kcontext, &this->kcontext);
     }
 
     // 从swtch返回后（即当前进程被重新调度），释放全局调度锁
     release_sched_lock();
 }
-
+void trap_return(u64);
 u64 proc_entry(void (*entry)(u64), u64 arg)
 {
     // 新启动的进程继承了调度器的锁，需要在这里释放
     release_sched_lock();
+    // if (entry == trap_return) {
+    //     Proc *p = thisproc();
+
+    //     // 这是关键一步：
+    //     // 手动将内核栈指针 SP 移动到我们之前存放 UserContext 的位置。
+    //     // 这就模拟了 trap_entry 的行为，为 trap_return 准备好了它需要的数据。
+    //     asm volatile("mov sp, %0" : : "r"((u64)p->ucontext));
+        
+    //     // 现在 SP 已经指向了正确的 UserContext，可以安全地调用 trap_return 了。
+    //     trap_return(0); // 参数无所谓，不会被使用
+
+    //     // trap_return 永远不应该返回到这里。如果返回了，说明出错了。
+    //     printk("trap_return returned to proc_entry!");
+    //     PANIC(); 
+    // }
+    //     if (entry == trap_return) {
+    //     Proc *p = thisproc();
+    //     u64 current_sp;
+
+    //     // 获取执行 mov sp 指令前的 sp 值
+    //     asm volatile("mov %0, sp" : "=r"(current_sp));
+
+    //     // ============ 添加的测试代码 ============
+    //     if (p->pid > 0) { // 只打印用户进程，避免干扰
+    //         printk("\n--- SP POINTER TEST (PID: %d) ---\n", p->pid);
+    //         printk("  [BEFORE mov sp] Current SP      = 0x%llx\n", current_sp);
+    //         printk("  [TARGET]        p->ucontext     = 0x%llx\n", (usize)p->ucontext);
+    //         printk("  [REFERENCE]     p->kcontext     = 0x%llx\n", (usize)p->kcontext);
+    //         printk("--- END TEST ---\n\n");
+    //     }
+    //     // =======================================
+
+    //     // 这是关键一步：
+    //     // 手动将内核栈指针 SP 移动到我们之前存放 UserContext 的位置。
+    //     asm volatile("mov sp, %0" : : "r"((u64)p->ucontext));
+        
+    //     // 现在 SP 已经指向了正确的 UserContext，可以安全地调用 trap_return 了。
+    //     trap_return(0); // 参数无所谓，不会被使用
+
+    //     // trap_return 永远不应该返回到这里。如果返回了，说明出错了。
+    //     printk("trap_return returned to proc_entry!");
+    //     PANIC(); 
+    // }
     set_return_addr(entry);
     return arg;
 }
