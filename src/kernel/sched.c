@@ -37,6 +37,8 @@ static bool rb_proc_less(struct rb_node_ *lnode, struct rb_node_ *rnode)
     // vruntime相同时按pid排序，保证确定性
     return lproc->pid < rproc->pid;
 }
+static void update_this_proc(Proc *p);
+static Proc *pick_next();
 
 // 调度定时器处理函数（抢占式调度核心）
 static void sched_timer_handler(struct timer *timer)
@@ -45,20 +47,45 @@ static void sched_timer_handler(struct timer *timer)
     acquire_spinlock(&global_sched_lock);
     
     Proc *current = thisproc();
+    int cpu_id = cpuid();
+    struct rb_root_ *queue = &cpus[cpu_id].sched.run_queue;
+    struct rb_node_ *leftmost = _rb_first(queue);
     
-    // idle进程不需要抢占
+    // idle进程：检查是否有任务需要运行
     if (current->idle) {
-        release_spinlock(&global_sched_lock);
-        // 为idle进程重新设置定时器
-        timer->elapse = SCHED_TIMESLICE_MS;
-        set_cpu_timer(timer);
-        return;
+        if (leftmost) {
+            // 有任务等待，执行调度切换到该任务
+            // 注意：idle不改变状态，直接调用pick_next和切换逻辑
+            auto next = pick_next();
+            update_this_proc(next);
+            ASSERT(next->state == RUNNABLE || next->idle);
+            
+            next->state = RUNNING;
+            next->schinfo.start_exec_time = get_timestamp();
+            
+            // 为新进程设置调度定时器
+            sched_timers[cpu_id].elapse = SCHED_TIMESLICE_MS;
+            set_cpu_timer(&sched_timers[cpu_id]);
+            
+            if (next != current) {
+                attach_pgdir(&next->pgdir);
+                swtch(next->kcontext, &current->kcontext);
+            }
+            
+            release_spinlock(&global_sched_lock);
+            return;
+        } else {
+            // 没有任务，继续运行idle
+            release_spinlock(&global_sched_lock);
+            timer->elapse = SCHED_TIMESLICE_MS;
+            set_cpu_timer(timer);
+            return;
+        }
     }
     
     // 如果当前进程不是RUNNING状态，不进行抢占
     if (current->state != RUNNING) {
         release_spinlock(&global_sched_lock);
-        // 重新设置定时器
         timer->elapse = SCHED_TIMESLICE_MS;
         set_cpu_timer(timer);
         return;
@@ -76,10 +103,6 @@ static void sched_timer_handler(struct timer *timer)
     }
     
     // 检查是否需要抢占
-    int cpu_id = cpuid();
-    struct rb_root_ *queue = &cpus[cpu_id].sched.run_queue;
-    struct rb_node_ *leftmost = _rb_first(queue);
-    
     bool should_preempt = false;
     
     if (leftmost) {
@@ -89,10 +112,8 @@ static void sched_timer_handler(struct timer *timer)
     
     if (should_preempt) {
         // 执行抢占调度
-        // 注意：sched()会为新进程设置定时器，所以这里不需要再设置
         sched(RUNNABLE);
-        // sched会释放锁，返回后说明当前进程又被调度回来
-        // 定时器已经在sched()中设置好了，这里不需要再设置
+        // sched会释放锁并设置定时器，返回后不需要再处理
     } else {
         release_spinlock(&global_sched_lock);
         // 没有其他进程，继续运行当前进程，重新设置定时器
@@ -218,6 +239,10 @@ bool activate_proc(Proc *p)
         // 插入红黑树
         _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
         cpus[target_cpu].sched.task_count++;
+        
+        // 如果目标CPU当前运行的是idle进程，且该CPU的调度定时器还没触发，
+        // 我们需要确保它能尽快调度到新任务
+        // 但由于cpu.c不能改，我们只能依赖定时器自然触发
     
         release_sched_lock();
         return true;
@@ -257,7 +282,8 @@ static void update_this_state(enum procstate new_state)
 {
     Proc *this = thisproc();
     if (this->idle) {
-        this->state = new_state;
+        // idle进程保持RUNNING状态，不参与调度队列
+        this->state = RUNNING;
         return;
     }
     
@@ -348,8 +374,8 @@ void sched(enum procstate new_state)
     
     ASSERT(this->state == RUNNING);
     
-    // 取消当前进程的调度定时器（如果不是idle且定时器还在树中）
-    if (!this->idle && !sched_timers[my_cpu].triggered) {
+    // 取消当前CPU的调度定时器
+    if (!sched_timers[my_cpu].triggered) {
         cancel_cpu_timer(&sched_timers[my_cpu]);
         sched_timers[my_cpu].triggered = true;
     }
@@ -364,11 +390,10 @@ void sched(enum procstate new_state)
     next->state = RUNNING;
     next->schinfo.start_exec_time = get_timestamp();
     
-    // 为新进程设置调度定时器（如果不是idle）
-    if (!next->idle) {
-        sched_timers[my_cpu].elapse = SCHED_TIMESLICE_MS;
-        set_cpu_timer(&sched_timers[my_cpu]);
-    }
+    // 为新进程设置调度定时器（包括idle进程）
+    // 这样idle进程也能定期检查是否有新任务
+    sched_timers[my_cpu].elapse = SCHED_TIMESLICE_MS;
+    set_cpu_timer(&sched_timers[my_cpu]);
     
     if (next != this) {
         attach_pgdir(&next->pgdir);

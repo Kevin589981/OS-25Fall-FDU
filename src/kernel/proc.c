@@ -331,9 +331,9 @@ int kill(int pid)
     // Set the killed flag of the proc to true and return 0.
     // Return -1 if the pid is invalid (proc not found).
     acquire_spinlock(&global_process_lock);
-    printk("try to kill %d\n",pid);
+    // printk("try to kill %d\n",pid);
     Proc *target=find_to_kill(pid, &root_proc);
-    printk("find kill target %d\n",pid);
+    // printk("find kill target %d\n",pid);
     if (!target){
         release_spinlock(&global_process_lock);
         return -1;
