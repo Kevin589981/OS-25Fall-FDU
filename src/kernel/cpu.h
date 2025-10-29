@@ -5,7 +5,7 @@
 #include <common/list.h>
 
 #define NCPU 4
-#define SCHED_TIMESLICE_MS 10
+#define SCHED_TIMESLICE_MS 8
 struct sched {
     struct rb_root_ run_queue;  // 红黑树存储RUNNABLE进程
     u64 task_count;
