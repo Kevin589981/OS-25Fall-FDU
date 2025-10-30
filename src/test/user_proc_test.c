@@ -45,9 +45,9 @@ static Semaphore myrepot_done;
 
 u64 syscall_myreport(u64 id)
 {
-#ifdef lab3_debug1
-    printk("user_proc_test.c:48\n");
-#endif
+// #ifdef lab3_debug1
+//     printk("user_proc_test.c:48\n");
+// #endif
     static bool stop;
     ASSERT(id < 22);
     if (stop)
@@ -92,7 +92,7 @@ void user_proc_test()
         pids[i] = start_proc(p, trap_return, 0);
         printk("pid[%d] = %d\n", i, pids[i]);
     }
-    printk("user_proc_test.c:91\n");
+    // printk("user_proc_test.c:91\n");
     ASSERT(wait_sem(&myrepot_done));
     printk("done\n");
     for (int i = 0; i < 22; i++)
