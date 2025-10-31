@@ -7,8 +7,8 @@
 #define NCPU 4
 
 // --- 新增/修改的宏 ---
-#define SCHED_TIMESLICE_MS 8         // 保留作为idle进程或只有一个任务时的默认时间片
-#define SCHED_LATENCY_MS 20          // 调度周期，单位：毫秒
+#define SCHED_TIMESLICE_MS 20         // 保留作为idle进程或只有一个任务时的默认时间片
+#define SCHED_LATENCY_MS 50          // 调度周期，单位：毫秒
 #define SCHED_MIN_GRANULARITY_MS 2   // 最小时间片，单位：毫秒
 
 struct sched {

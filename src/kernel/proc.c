@@ -92,20 +92,19 @@ int prio_to_weight[40]={
 unsigned long pid_bitmap[BITMAP_SIZE];
 
 // 用于记录下一次开始搜索空闲PID的位置，以提高效率
-static int next_pid_to_check = 0;
+static int next_pid_to_check = 1;
 
 // 初始化PID分配器
 void init_pid_allocator() {
     // 初始化位图，将所有位清零，表示所有PID都未被分配
     memset(pid_bitmap, 0, sizeof(pid_bitmap));
-    next_pid_to_check = 0;
-    // 保留PID 0
-    // set_bit(0, pid_bitmap);
+    next_pid_to_check = 1;
+    pid_bitmap[0] |= 1UL; 
 }
 
-// 回收一个PID
+// 回收一个PID (此函数已是O(1)，无需修改)
 void pid_recycler(int pid) {
-    if (pid < 0 || pid >= MAX_PID) {
+    if (pid <= 0 || pid >= MAX_PID) {
         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
         return;
     }
@@ -114,44 +113,68 @@ void pid_recycler(int pid) {
     printk("Recycling PID: %d\n", pid);
 #endif
 
-    // 使用原子操作或在锁保护下清除对应位
-    // 这里我们假设它会在 global_process_lock 的保护下被调用
     int index = pid / BITS_PER_LONG;
     int offset = pid % BITS_PER_LONG;
     pid_bitmap[index] &= ~(1UL << offset);
 }
 
-// 分配一个PID
+//==============================================================================
+//           分配一个PID (使用 AArch64 内联汇编优化)
+//==============================================================================
 int pid_allocator() {
-    // 假设此函数总是在 global_process_lock 保护下调用
-    
-    // 从上次检查的位置开始循环查找
-    for (int i = 0; i < MAX_PID; ++i) {
-        int pid = (next_pid_to_check + i) % MAX_PID;
-        if (pid == 0) continue; // 跳过PID 0
+    // 假设此函数总是在锁保护下调用
 
-        int index = pid / BITS_PER_LONG;
-        int offset = pid % BITS_PER_LONG;
+    // 从上次检查的字开始，遍历整个位图
+    usize start_index = (next_pid_to_check / BITS_PER_LONG) % BITMAP_SIZE;
 
-        // 检查该位是否为0 (未被占用)
-        if (!(pid_bitmap[index] & (1UL << offset))) {
-            // 标记该位为1 (已占用)
-            pid_bitmap[index] |= (1UL << offset);
-            
-            // 更新下一次开始搜索的位置
-            next_pid_to_check = pid + 1;
-            if (next_pid_to_check >= MAX_PID) {
-                next_pid_to_check = 1; // 回到开头
-            }
-            
-            return pid;
+    for (usize i = 0; i < BITMAP_SIZE; ++i) {
+        int index = (start_index + i) % BITMAP_SIZE;
+        unsigned long word = pid_bitmap[index];
+
+        // 优化: 如果这个字的所有位都已设置 (全满)，则快速跳过。
+        if (word == ~0UL) {
+            continue;
         }
+
+        // 找到了一个不满的字，现在使用硬件指令来快速找到第一个0位。
+        unsigned long inverted_word = ~word;
+        unsigned long offset;
+
+        // 使用AArch64内联汇编计算尾随零的数量(Count Trailing Zeros)
+        // 相当于找到 inverted_word 中第一个为1的位的索引
+        asm volatile (
+            "rbit %0, %1\n\t"  // 1. 将位的顺序颠倒
+            "clz  %0, %0\n\t"  // 2. 计算颠倒后数字的前导零数量
+            : "=r" (offset)    // 输出: offset ('='表示写入, 'r'表示通用寄存器)
+            : "r" (inverted_word) // 输入: inverted_word ('r'表示通用寄存器)
+        );
+
+        // 计算最终的PID
+        int pid = index * BITS_PER_LONG + offset;
+
+        // 边界检查: 确保计算出的PID没有超过最大限制
+        // 这在最后一个字不是完整填充的情况下很重要
+        if (pid >= MAX_PID) {
+            continue; // 继续搜索下一个可能的字
+        }
+        
+        // 找到了一个有效的、空闲的PID
+
+        // 标记该位为1 (已占用)
+        pid_bitmap[index] |= (1UL << offset);
+
+        // 更新下一次开始搜索的位置，以实现轮转效果
+        next_pid_to_check = pid + 1;
+        if (next_pid_to_check >= MAX_PID) {
+            next_pid_to_check = 1; // 回到开头 (跳过PID 0)
+        }
+
+        return pid;
     }
 
     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
     return -1; // 返回错误码
 }
-
 
 
 

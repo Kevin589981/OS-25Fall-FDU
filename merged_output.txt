@@ -25,6 +25,34 @@ SpinLock global_sched_lock;
 // 每个CPU的调度定时器
 static struct timer sched_timers[NCPU];
 
+// 用于初始vruntime的展开，避免所有进程vruntime相同
+static u64 vruntime_spread_counter = 0;
+static u64 calculate_timeslice(Proc *p)
+{
+    int cpu_id = cpuid();
+    struct sched *s = &cpus[cpu_id].sched;
+
+    // 如果是idle进程或者当前CPU只有一个可运行任务，则给予一个固定的默认时间片
+    if (p->idle || s->task_count <= 1) {
+        return SCHED_TIMESLICE_MS;
+    }
+
+    // 总权重 = 运行队列中的进程权重 + 即将运行的当前进程的权重
+    u64 total_weight = s->queue_weight + WEIGHT(p->schinfo.nice);
+    u64 timeslice;
+
+    // 根据权重比例计算理想时间片
+    // 注意：为保证计算精度，先乘后除
+    timeslice = (u64)SCHED_LATENCY_MS * WEIGHT(p->schinfo.nice) / total_weight;
+
+    // 确保时间片不小于最小粒度
+    if (timeslice < SCHED_MIN_GRANULARITY_MS) {
+        return SCHED_MIN_GRANULARITY_MS;
+    }
+
+    return timeslice;
+}
+
 // 红黑树比较函数：按vruntime排序
 static bool rb_proc_less(struct rb_node_ *lnode, struct rb_node_ *rnode)
 {
@@ -39,11 +67,12 @@ static bool rb_proc_less(struct rb_node_ *lnode, struct rb_node_ *rnode)
     // vruntime相同时按pid排序，保证确定性
     return lproc->pid < rproc->pid;
 }
+static void update_this_proc(Proc *p);
+static Proc *pick_next();
 
 // 调度定时器处理函数（抢占式调度核心）
 static void sched_timer_handler(struct timer *timer)
 {
-    // 获取调度锁
     acquire_spinlock(&global_sched_lock);
     
     Proc *current = thisproc();
@@ -51,11 +80,8 @@ static void sched_timer_handler(struct timer *timer)
     struct rb_root_ *queue = &cpus[cpu_id].sched.run_queue;
     struct rb_node_ *leftmost = _rb_first(queue);
     
-    // idle进程：检查是否有任务需要运行
     if (current->idle) {
         if (leftmost) {
-            // 有任务等待，执行调度切换到该任务
-            // 注意：idle不改变状态，直接调用pick_next和切换逻辑
             auto next = pick_next();
             update_this_proc(next);
             ASSERT(next->state == RUNNABLE || next->idle);
@@ -63,8 +89,8 @@ static void sched_timer_handler(struct timer *timer)
             next->state = RUNNING;
             next->schinfo.start_exec_time = get_timestamp();
             
-            // 为新进程设置调度定时器
-            sched_timers[cpu_id].elapse = SCHED_TIMESLICE_MS;
+            // 修改：根据nice值计算时间片
+            sched_timers[cpu_id].elapse = calculate_timeslice(next);
             set_cpu_timer(&sched_timers[cpu_id]);
             
             if (next != current) {
@@ -75,7 +101,42 @@ static void sched_timer_handler(struct timer *timer)
             release_spinlock(&global_sched_lock);
             return;
         } else {
-            // 没有任务，继续运行idle
+            Proc *stolen = NULL;
+            for (int i = 1; i < NCPU; i++) {
+                int target_cpu_id = (cpu_id + i) % NCPU;
+                struct rb_root_ *other_queue = &cpus[target_cpu_id].sched.run_queue;
+                
+                if (cpus[target_cpu_id].sched.task_count > 1) {
+                    struct rb_node_ *leftmost_other = _rb_first(other_queue);
+                    if (leftmost_other) {
+                        stolen = container_of(leftmost_other, Proc, schinfo.node);
+                        _rb_erase(leftmost_other, other_queue);
+                        cpus[target_cpu_id].sched.task_count--;
+                        // 修改：更新被窃取CPU的queue_weight
+                        cpus[target_cpu_id].sched.queue_weight -= WEIGHT(stolen->schinfo.nice);
+                        
+                        if (stolen->schinfo.vruntime < cpus[cpu_id].sched.min_vruntime) {
+                            stolen->schinfo.vruntime = cpus[cpu_id].sched.min_vruntime;
+                        }
+                        cpus[cpu_id].sched.task_count++;
+                        
+                        update_this_proc(stolen);
+                        stolen->state = RUNNING;
+                        stolen->schinfo.start_exec_time = get_timestamp();
+                        
+                        // 修改：根据nice值计算时间片
+                        sched_timers[cpu_id].elapse = calculate_timeslice(stolen);
+                        set_cpu_timer(&sched_timers[cpu_id]);
+                        
+                        attach_pgdir(&stolen->pgdir);
+                        swtch(stolen->kcontext, &current->kcontext);
+                        
+                        release_spinlock(&global_sched_lock);
+                        return;
+                    }
+                }
+            }
+            
             release_spinlock(&global_sched_lock);
             timer->elapse = SCHED_TIMESLICE_MS;
             set_cpu_timer(timer);
@@ -83,7 +144,6 @@ static void sched_timer_handler(struct timer *timer)
         }
     }
     
-    // 如果当前进程不是RUNNING状态，不进行抢占
     if (current->state != RUNNING) {
         release_spinlock(&global_sched_lock);
         timer->elapse = SCHED_TIMESLICE_MS;
@@ -91,7 +151,6 @@ static void sched_timer_handler(struct timer *timer)
         return;
     }
     
-    // 更新当前进程的vruntime
     u64 current_time = get_timestamp();
     if (current->schinfo.start_exec_time > 0) {
         u64 delta_exec = current_time - current->schinfo.start_exec_time;
@@ -104,20 +163,16 @@ static void sched_timer_handler(struct timer *timer)
     
     // 检查是否需要抢占
     bool should_preempt = false;
-    
     if (leftmost) {
-        // 队列中有等待的进程，需要抢占以保证公平性
         should_preempt = true;
     }
     
     if (should_preempt) {
-        // 执行抢占调度
         sched(RUNNABLE);
-        // sched会释放锁并设置定时器，返回后不需要再处理
     } else {
         release_spinlock(&global_sched_lock);
-        // 没有其他进程，继续运行当前进程，重新设置定时器
-        timer->elapse = SCHED_TIMESLICE_MS;
+        // 修改：即使不抢占，也重新计算时间片并设置定时器
+        timer->elapse = calculate_timeslice(current);
         set_cpu_timer(timer);
     }
 }
@@ -148,23 +203,23 @@ void init_sched()
     
     for (int i = 0; i < NCPU; i++) {
         struct sched *s = &cpus[i].sched;
-        // 初始化红黑树
         s->run_queue.rb_node = NULL;
         s->task_count = 0;
         s->min_vruntime = 0;
-        cpus[i].zombie_to_reap = kalloc(sizeof(KernelContext));
+        s->queue_weight = 0; // 修改：初始化queue_weight
+        // cpus[i].zombie_to_reap = kalloc(sizeof(KernelContext));
         
-        // 初始化调度定时器
         memset(&sched_timers[i], 0, sizeof(struct timer));
         sched_timers[i].elapse = SCHED_TIMESLICE_MS;
         sched_timers[i].handler = sched_timer_handler;
-        sched_timers[i].data = i; // 存储CPU ID
-        sched_timers[i].triggered = true; // 初始状态为已触发（不在树中）
-        // 初始化rb_node
+        sched_timers[i].data = i; 
+        sched_timers[i].triggered = true; 
         sched_timers[i]._node.rb_left = NULL;
         sched_timers[i]._node.rb_right = NULL;
         sched_timers[i]._node.__rb_parent_color = 0;
     }
+    
+    vruntime_spread_counter = 0;
 }
 
 Proc *thisproc()
@@ -221,7 +276,6 @@ bool activate_proc(Proc *p)
     }
     
     else if (p->state == SLEEPING || p->state == UNUSED) {
-        // 选择任务数最少的CPU
         int target_cpu = 0;
         u64 min_count = cpus[0].sched.task_count;
         
@@ -232,17 +286,19 @@ bool activate_proc(Proc *p)
             }
         }
     
-        // 新进程的vruntime设置为目标CPU的最小vruntime，避免饥饿
-        p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime;
+        u64 spread_offset = vruntime_spread_counter * 100000;
+        vruntime_spread_counter++;
+        if (vruntime_spread_counter >= 100) {
+            vruntime_spread_counter = 0;
+        }
+        
+        p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime + spread_offset;
         p->state = RUNNABLE;
     
-        // 插入红黑树
         _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
         cpus[target_cpu].sched.task_count++;
-        
-        // 如果目标CPU当前运行的是idle进程，且该CPU的调度定时器还没触发，
-        // 我们需要确保它能尽快调度到新任务
-        // 但由于cpu.c不能改，我们只能依赖定时器自然触发
+        // 修改：更新queue_weight
+        cpus[target_cpu].sched.queue_weight += WEIGHT(p->schinfo.nice);
     
         release_sched_lock();
         return true;
@@ -256,6 +312,7 @@ bool activate_proc(Proc *p)
     PANIC();
     return false;
 }
+
 
 // 更新当前进程的vruntime
 static void update_vruntime(Proc *p, u64 current_time)
@@ -303,6 +360,7 @@ static void update_this_state(enum procstate new_state)
     if (new_state == RUNNABLE) {
         // RUNNING -> RUNNABLE: 插入红黑树
         _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
+        cpus[my_cpu].sched.queue_weight += WEIGHT(this->schinfo.nice);
     } else if (new_state == ZOMBIE) {
         cpus[my_cpu].sched.task_count--;
     }
@@ -322,6 +380,7 @@ static Proc *pick_next()
     if (leftmost) {
         next_proc = container_of(leftmost, Proc, schinfo.node);
         _rb_erase(leftmost, my_queue);
+        cpus[my_cpu].sched.queue_weight -= WEIGHT(next_proc->schinfo.nice);
         return next_proc;
     }
     
@@ -332,12 +391,13 @@ static Proc *pick_next()
         if (target_cpu_id == my_cpu) continue;
     
         struct rb_root_ *other_queue = &cpus[target_cpu_id].sched.run_queue;
-        if (cpus[target_cpu_id].sched.task_count > 0) {
+        if (cpus[target_cpu_id].sched.task_count > 1) { // 只从有多个任务的CPU窃取
             struct rb_node_ *leftmost_other = _rb_first(other_queue);
             if (leftmost_other) {
                 stolen = container_of(leftmost_other, Proc, schinfo.node);
                 _rb_erase(leftmost_other, other_queue);
                 cpus[target_cpu_id].sched.task_count--;
+                cpus[target_cpu_id].sched.queue_weight -= WEIGHT(stolen->schinfo.nice);
                 break;
             }
         }
@@ -391,8 +451,7 @@ void sched(enum procstate new_state)
     next->schinfo.start_exec_time = get_timestamp();
     
     // 为新进程设置调度定时器（包括idle进程）
-    // 这样idle进程也能定期检查是否有新任务
-    sched_timers[my_cpu].elapse = SCHED_TIMESLICE_MS;
+    sched_timers[my_cpu].elapse = calculate_timeslice(next);
     set_cpu_timer(&sched_timers[my_cpu]);
     
     if (next != this) {
@@ -513,24 +572,84 @@ int prio_to_weight[40]={
     /*  10 */       110,        87,        70,        56,        45,
     /*  15 */        36,        29,        23,        18,        15,
 }; 
+// unsigned long pid_bitmap[BITMAP_SIZE];
 
+// // 用于记录下一次开始搜索空闲PID的位置，以提高效率
+// static int next_pid_to_check = 0;
+
+// // 初始化PID分配器
+// void init_pid_allocator() {
+//     // 初始化位图，将所有位清零，表示所有PID都未被分配
+//     memset(pid_bitmap, 0, sizeof(pid_bitmap));
+//     next_pid_to_check = 0;
+//     // 保留PID 0
+//     // set_bit(0, pid_bitmap);
+// }
+
+// // 回收一个PID
+// void pid_recycler(int pid) {
+//     if (pid < 0 || pid >= MAX_PID) {
+//         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
+//         return;
+//     }
+
+// #ifdef PID_DEBUG
+//     printk("Recycling PID: %d\n", pid);
+// #endif
+
+//     // 使用原子操作或在锁保护下清除对应位
+//     // 这里我们假设它会在 global_process_lock 的保护下被调用
+//     int index = pid / BITS_PER_LONG;
+//     int offset = pid % BITS_PER_LONG;
+//     pid_bitmap[index] &= ~(1UL << offset);
+// }
+
+// // 分配一个PID
+// int pid_allocator() {
+//     // 假设此函数总是在 global_process_lock 保护下调用
+    
+//     // 从上次检查的位置开始循环查找
+//     for (int i = 0; i < MAX_PID; ++i) {
+//         int pid = (next_pid_to_check + i) % MAX_PID;
+//         if (pid == 0) continue; // 跳过PID 0
+
+//         int index = pid / BITS_PER_LONG;
+//         int offset = pid % BITS_PER_LONG;
+
+//         // 检查该位是否为0 (未被占用)
+//         if (!(pid_bitmap[index] & (1UL << offset))) {
+//             // 标记该位为1 (已占用)
+//             pid_bitmap[index] |= (1UL << offset);
+            
+//             // 更新下一次开始搜索的位置
+//             next_pid_to_check = pid + 1;
+//             if (next_pid_to_check >= MAX_PID) {
+//                 next_pid_to_check = 1; // 回到开头
+//             }
+            
+//             return pid;
+//         }
+//     }
+
+//     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
+//     return -1; // 返回错误码
+// }
 unsigned long pid_bitmap[BITMAP_SIZE];
 
 // 用于记录下一次开始搜索空闲PID的位置，以提高效率
-static int next_pid_to_check = 0;
+static int next_pid_to_check = 1;
 
 // 初始化PID分配器
 void init_pid_allocator() {
     // 初始化位图，将所有位清零，表示所有PID都未被分配
     memset(pid_bitmap, 0, sizeof(pid_bitmap));
-    next_pid_to_check = 0;
-    // 保留PID 0
-    // set_bit(0, pid_bitmap);
+    next_pid_to_check = 1;
+    pid_bitmap[0] |= 1UL; 
 }
 
-// 回收一个PID
+// 回收一个PID (此函数已是O(1)，无需修改)
 void pid_recycler(int pid) {
-    if (pid < 0 || pid >= MAX_PID) {
+    if (pid <= 0 || pid >= MAX_PID) {
         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
         return;
     }
@@ -539,44 +658,68 @@ void pid_recycler(int pid) {
     printk("Recycling PID: %d\n", pid);
 #endif
 
-    // 使用原子操作或在锁保护下清除对应位
-    // 这里我们假设它会在 global_process_lock 的保护下被调用
     int index = pid / BITS_PER_LONG;
     int offset = pid % BITS_PER_LONG;
     pid_bitmap[index] &= ~(1UL << offset);
 }
 
-// 分配一个PID
+//==============================================================================
+//           分配一个PID (使用 AArch64 内联汇编优化)
+//==============================================================================
 int pid_allocator() {
-    // 假设此函数总是在 global_process_lock 保护下调用
-    
-    // 从上次检查的位置开始循环查找
-    for (int i = 0; i < MAX_PID; ++i) {
-        int pid = (next_pid_to_check + i) % MAX_PID;
-        if (pid == 0) continue; // 跳过PID 0
+    // 假设此函数总是在锁保护下调用
 
-        int index = pid / BITS_PER_LONG;
-        int offset = pid % BITS_PER_LONG;
+    // 从上次检查的字开始，遍历整个位图
+    usize start_index = (next_pid_to_check / BITS_PER_LONG) % BITMAP_SIZE;
 
-        // 检查该位是否为0 (未被占用)
-        if (!(pid_bitmap[index] & (1UL << offset))) {
-            // 标记该位为1 (已占用)
-            pid_bitmap[index] |= (1UL << offset);
-            
-            // 更新下一次开始搜索的位置
-            next_pid_to_check = pid + 1;
-            if (next_pid_to_check >= MAX_PID) {
-                next_pid_to_check = 1; // 回到开头
-            }
-            
-            return pid;
+    for (usize i = 0; i < BITMAP_SIZE; ++i) {
+        int index = (start_index + i) % BITMAP_SIZE;
+        unsigned long word = pid_bitmap[index];
+
+        // 优化: 如果这个字的所有位都已设置 (全满)，则快速跳过。
+        if (word == ~0UL) {
+            continue;
         }
+
+        // 找到了一个不满的字，现在使用硬件指令来快速找到第一个0位。
+        unsigned long inverted_word = ~word;
+        unsigned long offset;
+
+        // 使用AArch64内联汇编计算尾随零的数量(Count Trailing Zeros)
+        // 相当于找到 inverted_word 中第一个为1的位的索引
+        asm volatile (
+            "rbit %0, %1\n\t"  // 1. 将位的顺序颠倒
+            "clz  %0, %0\n\t"  // 2. 计算颠倒后数字的前导零数量
+            : "=r" (offset)    // 输出: offset ('='表示写入, 'r'表示通用寄存器)
+            : "r" (inverted_word) // 输入: inverted_word ('r'表示通用寄存器)
+        );
+
+        // 计算最终的PID
+        int pid = index * BITS_PER_LONG + offset;
+
+        // 边界检查: 确保计算出的PID没有超过最大限制
+        // 这在最后一个字不是完整填充的情况下很重要
+        if (pid >= MAX_PID) {
+            continue; // 继续搜索下一个可能的字
+        }
+        
+        // 找到了一个有效的、空闲的PID
+
+        // 标记该位为1 (已占用)
+        pid_bitmap[index] |= (1UL << offset);
+
+        // 更新下一次开始搜索的位置，以实现轮转效果
+        next_pid_to_check = pid + 1;
+        if (next_pid_to_check >= MAX_PID) {
+            next_pid_to_check = 1; // 回到开头 (跳过PID 0)
+        }
+
+        return pid;
     }
 
     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
     return -1; // 返回错误码
 }
-
 
 
 
@@ -817,9 +960,9 @@ int kill(int pid)
     // Set the killed flag of the proc to true and return 0.
     // Return -1 if the pid is invalid (proc not found).
     acquire_spinlock(&global_process_lock);
-    printk("try to kill %d\n",pid);
+    // printk("try to kill %d\n",pid);
     Proc *target=find_to_kill(pid, &root_proc);
-    printk("find kill target %d\n",pid);
+    // printk("find kill target %d\n",pid);
     if (!target){
         release_spinlock(&global_process_lock);
         return -1;
@@ -840,11 +983,17 @@ int kill(int pid)
 #include <common/list.h>
 
 #define NCPU 4
-#define SCHED_TIMESLICE_MS 20
+
+// --- 新增/修改的宏 ---
+#define SCHED_TIMESLICE_MS 8         // 保留作为idle进程或只有一个任务时的默认时间片
+#define SCHED_LATENCY_MS 20          // 调度周期，单位：毫秒
+#define SCHED_MIN_GRANULARITY_MS 2   // 最小时间片，单位：毫秒
+
 struct sched {
     struct rb_root_ run_queue;  // 红黑树存储RUNNABLE进程
     u64 task_count;
-    u64 min_vruntime;          // 跟踪最小vruntime
+    u64 min_vruntime;
+    u64 queue_weight;           // 新增：记录在run_queue中的所有进程的权重之和
     struct Proc* current_proc; // 当前RUNNING进程
     struct Proc* idle;
 };
@@ -853,7 +1002,7 @@ struct cpu {
     bool online;
     struct rb_root_ timer;
     struct sched sched;
-    KernelContext *zombie_to_reap; // 需要回收的僵尸进程
+    // KernelContext *zombie_to_reap;
 };
 
 extern SpinLock global_sched_lock;
@@ -863,7 +1012,7 @@ struct timer {
     bool triggered;
     int elapse;
     u64 _key;
-    struct rb_node_ _node; //用于存放需要定时的timer红黑树节点
+    struct rb_node_ _node;
     void (*handler)(struct timer *);
     u64 data;
 };
@@ -984,6 +1133,340 @@ void set_cpu_off()
     _arch_disable_trap();
     cpus[cpuid()].online = false;
     printk("CPU %lld: stopped\n", cpuid());
+}
+
+================================================================================
+#pt.c
+
+#include <kernel/pt.h>
+#include <kernel/mem.h>
+#include <common/string.h>
+#include <aarch64/intrinsic.h>
+
+PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc)
+{
+    // TODO:
+    // Return a pointer to the PTE (Page Table Entry) for virtual address 'va'
+    // u64 page_base=PAGE_BASE(va);
+    // If the entry not exists (NEEDN'T BE VALID), allocate it if alloc=true, or return NULL if false.
+    PTEntriesPtr l0_table = pgdir->pt;
+    if (!l0_table){
+        if (!alloc){
+            return NULL;
+        }
+        l0_table=kalloc_page();
+        if (!l0_table){
+            return NULL;
+        }
+        pgdir->pt=l0_table;
+    }
+
+    // 得到l1页表的地址
+    u64 idx0=VA_PART0(va);
+    PTEntry *pte0=&l0_table[idx0];
+    PTEntriesPtr l1_table;
+    if ((*pte0&PTE_TABLE)==PTE_TABLE){
+        l1_table=(PTEntriesPtr)P2K(PTE_ADDRESS(*pte0));
+    }else{
+        if (!alloc){
+            return NULL;
+        }
+        l1_table=kalloc_page();
+        if (l1_table==NULL){
+            return NULL;
+        }
+        *pte0=K2P(l1_table)|PTE_TABLE;
+    }
+
+    // 得到l2页表的位置
+    u64 idx1=VA_PART1(va);
+    PTEntry *pte1=&l1_table[idx1];
+    PTEntriesPtr l2_table;
+    if ((*pte1&PTE_TABLE)==PTE_TABLE){
+        l2_table=(PTEntriesPtr)P2K(PTE_ADDRESS(*pte1));
+    }else{
+        if (!alloc){
+            return NULL;
+        }
+        l2_table=kalloc_page();
+        if (l2_table==NULL){
+            return NULL;
+        }
+        *pte1=K2P(l2_table)|PTE_TABLE;
+    }
+
+    // 得到l3页表的位置
+    u64 idx2=VA_PART2(va);
+    PTEntry *pte2=&l2_table[idx2];
+    PTEntriesPtr l3_table;
+    if ((*pte2&PTE_TABLE)==PTE_TABLE){
+        l3_table=(PTEntriesPtr)P2K(PTE_ADDRESS(*pte2));
+    }else{
+        if (!alloc){
+            return NULL;
+        }
+        l3_table=kalloc_page();
+        if (l3_table==NULL){
+            return NULL;
+        }
+        *pte2=K2P(l3_table)|PTE_TABLE;
+    }
+
+    u64 idx3=VA_PART3(va);
+    return &l3_table[idx3];
+    // THIS ROUTINUE GETS THE PTE, NOT THE PAGE DESCRIBED BY PTE.
+    // Return Kernel Address.
+}
+
+void init_pgdir(struct pgdir *pgdir)
+{
+    pgdir->pt = NULL;
+}
+
+void free_pgdir(struct pgdir *pgdir)
+{
+    // TODO:
+    // Free pages used by the page table. If pgdir->pt=NULL, do nothing.
+    if (pgdir->pt==NULL)return;
+    // DONT FREE PAGES DESCRIBED BY THE PAGE TABLE
+    PTEntriesPtr l0_table = pgdir->pt;
+    for (u64 i=0;i<N_PTE_PER_TABLE;i++){
+        if ((l0_table[i]&PTE_TABLE)==PTE_TABLE){
+            PTEntriesPtr l1_table=(PTEntriesPtr)P2K(PTE_ADDRESS(l0_table[i]));
+            for (u64 j=0;j<N_PTE_PER_TABLE;j++){
+                if ((l1_table[j]&PTE_TABLE)==PTE_TABLE){
+                    PTEntriesPtr l2_table=(PTEntriesPtr)P2K(PTE_ADDRESS(l1_table[j]));
+                    for (u64 k=0;k<N_PTE_PER_TABLE;k++){
+                        if ((l2_table[k]&PTE_TABLE)==PTE_TABLE){
+                            PTEntriesPtr l3_table=(PTEntriesPtr)P2K(PTE_ADDRESS(l2_table[k]));
+                            kfree_page(l3_table);
+                        }
+                    }
+                    kfree_page(l2_table);
+                }
+            }
+            kfree_page(l1_table);
+        }
+    }
+    kfree_page(l0_table);
+}
+
+void attach_pgdir(struct pgdir *pgdir)
+{
+    extern PTEntries invalid_pt;
+    if (pgdir->pt)
+        arch_set_ttbr0(K2P(pgdir->pt));
+    else
+        arch_set_ttbr0(K2P(&invalid_pt));
+}
+
+================================================================================
+#syscall.c
+
+#include <kernel/syscall.h>
+#include <kernel/sched.h>
+#include <kernel/printk.h>
+#include <common/sem.h>
+#include <test/test.h>
+#include <aarch64/intrinsic.h>
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverride-init"
+
+void *syscall_table[NR_SYSCALL] = {
+    [0 ... NR_SYSCALL - 1] = NULL,
+    [SYS_myreport] = (void *)syscall_myreport,
+};
+
+void syscall_entry(UserContext *context)
+{
+#ifdef lab3_debug1
+    printk("syscall.c:18 \n");
+#endif
+    // TODO
+    // Invoke syscall_table[id] with args and set the return value.
+    // id is stored in x8. args are stored in x0-x5. return value is stored in x0.
+    // be sure to check the range of id. if id >= NR_SYSCALL, panic.
+    u64 syscall_id=context->x[8];
+    if (syscall_id>=NR_SYSCALL){
+        PANIC();
+    }
+    void *func=syscall_table[syscall_id];
+    if (func==NULL){
+        PANIC();
+    }
+    typedef u64 (*func_call)(u64,u64,u64,u64,u64,u64);
+    func_call call=(func_call)func;
+    u64 x0=call(context->x[0],
+                context->x[1],
+                context->x[2],
+                context->x[3],
+                context->x[4],
+                context->x[5]);
+    context->x[0]=x0;
+}
+
+#pragma GCC diagnostic pop
+================================================================================
+#trap.S
+
+#define pushp(a, b) stp a, b, [sp, #-0x10]!
+#define popp(a, b) ldp a, b, [sp], #0x10 
+
+/* `exception_vector.S` send all traps here. */
+.global trap_entry
+trap_entry:
+// TODO: save UserContext
+pushp(x16,x17)
+pushp(x14,x15)
+pushp(x12,x13)
+pushp(x10,x11)
+pushp(x8,x9)
+pushp(x6,x7)
+pushp(x4,x5)
+pushp(x2,x3)
+pushp(x0,x1)
+mrs x1,elr_el1
+mrs x0,spsr_el1
+pushp(x0,x1)
+mrs x0,sp_el0
+pushp(x0, xzr)
+mov x0,sp //UserContext指针
+bl trap_global_handler
+ 
+.global trap_return
+trap_return:
+// TODO: restore UserContext
+
+popp(x0, x1)       // x0 = sp_el0, x1 = 0 (来自xzr)
+msr sp_el0, x0     // 恢复用户栈指针
+popp(x0,x1)
+msr spsr_el1,x0
+msr elr_el1,x1
+popp(x0,x1)
+popp(x2,x3)
+popp(x4,x5)
+popp(x6,x7)
+popp(x8,x9)
+popp(x10,x11)
+popp(x12,x13)
+popp(x14,x15)
+popp(x16,x17)
+eret
+
+================================================================================
+#user_proc_test.c
+
+#include <test/test.h>
+#include <common/rc.h>
+#include <kernel/pt.h>
+#include <kernel/mem.h>
+#include <kernel/printk.h>
+#include <common/sem.h>
+#include <kernel/proc.h>
+#include <kernel/syscall.h>
+#include <driver/memlayout.h>
+#include <kernel/sched.h>
+
+PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc);
+
+void vm_test()
+{
+    printk("vm_test\n");
+    static void *p[100000];
+    extern RefCount kalloc_page_cnt;
+    struct pgdir pg;
+    int p0 = kalloc_page_cnt.count;
+    init_pgdir(&pg);
+    for (u64 i = 0; i < 100000; i++) {
+        p[i] = kalloc_page();
+        *get_pte(&pg, i << 12, true) = K2P(p[i]) | PTE_USER_DATA;
+        *(int *)p[i] = i;
+    }
+    attach_pgdir(&pg);
+    for (u64 i = 0; i < 100000; i++) {
+        ASSERT(*(int *)(P2K(PTE_ADDRESS(*get_pte(&pg, i << 12, false)))) ==
+               (int)i);
+        ASSERT(*(int *)(i << 12) == (int)i);
+    }
+    free_pgdir(&pg);
+    attach_pgdir(&pg);
+    for (u64 i = 0; i < 100000; i++)
+        kfree_page(p[i]);
+    ASSERT(kalloc_page_cnt.count == p0);
+    printk("vm_test PASS\n");
+}
+
+void trap_return(u64);
+
+static u64 proc_cnt[22] = { 0 }, cpu_cnt[4] = { 0 };
+static Semaphore myrepot_done;
+
+u64 syscall_myreport(u64 id)
+{
+// #ifdef lab3_debug1
+//     printk("user_proc_test.c:48\n");
+// #endif
+    static bool stop;
+    ASSERT(id < 22);
+    if (stop)
+        return 0;
+    proc_cnt[id]++;
+    cpu_cnt[cpuid()]++;
+    if (proc_cnt[id] > 12345) {
+        stop = true;
+        post_sem(&myrepot_done);
+    }
+    return 0;
+}
+
+void user_proc_test()
+{
+    printk("user_proc_test\n");
+    init_sem(&myrepot_done, 0);
+    extern char loop_start[], loop_end[];
+    int pids[22];
+    for (int i = 0; i < 22; i++) {
+        auto p = create_proc();
+        for (u64 q = (u64)loop_start; q < (u64)loop_end; q += PAGE_SIZE) {
+            *get_pte(&p->pgdir, EXTMEM + q - (u64)loop_start, true) =
+                    K2P(q) | PTE_USER_DATA;
+        }
+        ASSERT(p->pgdir.pt);
+
+        // TODO: setup the user context
+        // 1. set x0 = i
+        // 2. set elr = EXTMEM
+        // 3. set spsr = 0
+        #define USER_STACK_VA (1UL << 39)
+
+        void *user_stack = kalloc_page();
+        *get_pte(&p->pgdir, USER_STACK_VA - PAGE_SIZE, true) = K2P(user_stack) | PTE_USER_DATA;
+
+        p->ucontext->x[0]=i;
+        p->ucontext->elr=EXTMEM;
+        p->ucontext->spsr=0;
+        p->ucontext->sp = USER_STACK_VA-16;
+        
+        pids[i] = start_proc(p, trap_return, 0);
+        printk("pid[%d] = %d\n", i, pids[i]);
+    }
+    // printk("user_proc_test.c:91\n");
+    ASSERT(wait_sem(&myrepot_done));
+    printk("done\n");
+    for (int i = 0; i < 22; i++)
+        ASSERT(kill(pids[i]) == 0);
+    for (int i = 0; i < 22; i++) {
+        int code;
+        int pid = wait(&code);
+        printk("pid %d killed\n", pid);
+        ASSERT(code == -1);
+    }
+    printk("user_proc_test PASS\nRuntime:\n");
+    for (int i = 0; i < 4; i++)
+        printk("CPU %d: %llu\n", i, cpu_cnt[i]);
+    for (int i = 0; i < 22; i++)
+        printk("Proc %d: %llu\n", i, proc_cnt[i]);
 }
 
 ================================================================================
