@@ -359,7 +359,7 @@ static void update_this_state(enum procstate new_state)
         // RUNNING -> RUNNABLE: 插入红黑树
         _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
         cpus[my_cpu].sched.queue_weight += WEIGHT(this->schinfo.nice);
-    } else if (new_state == ZOMBIE) {
+    } else if (new_state == ZOMBIE||new_state==SLEEPING) {
         cpus[my_cpu].sched.task_count--;
     }
 }
