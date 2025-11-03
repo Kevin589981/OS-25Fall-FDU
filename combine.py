@@ -25,10 +25,10 @@ if __name__ == "__main__":
         "src/kernel/cpu.h",
         "src/kernel/cpu.c",
         "src/kernel/pt.c",
-        "src/kernel/syscall.c",
+        # "src/kernel/syscall.c",
         "src/aarch64/trap.S",
         "src/test/user_proc_test.c",
-        "src/user/loop.S"
+        # "src/user/loop.S"
     ]
     
     # 定义输出文件路径

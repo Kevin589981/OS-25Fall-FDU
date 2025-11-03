@@ -264,6 +264,8 @@ bool is_unused(Proc *p)
     return r;
 }
 
+// 文件: sched.c
+
 bool activate_proc(Proc *p)
 {   
     acquire_sched_lock(); 
@@ -284,13 +286,47 @@ bool activate_proc(Proc *p)
             }
         }
     
-        u64 spread_offset = vruntime_spread_counter * 100000;
+        // ===================== 修改开始 =====================
+        u64 base_vruntime;
+        // 如果目标CPU是空闲的，它的min_vruntime可能是一个陈旧的、被抬高的值。
+        // 为了避免新进程受到不公平的惩罚，需要从其他活跃的CPU同步一个更合理的vruntime基线。
+        if (cpus[target_cpu].sched.task_count == 0) {
+            u64 global_min_vruntime = -1; // 使用-1代表无穷大
+            bool found_active_cpu = false;
+            for (int i = 0; i < NCPU; i++) {
+                // 只考虑那些有任务正在运行的CPU
+                if (cpus[i].sched.task_count > 0) {
+                    if (!found_active_cpu || cpus[i].sched.min_vruntime < global_min_vruntime) {
+                        global_min_vruntime = cpus[i].sched.min_vruntime;
+                    }
+                    found_active_cpu = true;
+                }
+            }
+
+            if (found_active_cpu) {
+                // 如果找到了活跃的CPU，就以它们中最小的min_vruntime作为基准
+                base_vruntime = global_min_vruntime;
+                // 同时，也更新这个空闲CPU的min_vruntime，使其与系统保持同步
+                cpus[target_cpu].sched.min_vruntime = global_min_vruntime;
+            } else {
+                // 如果所有CPU都空闲，那么使用目标CPU自己的min_vruntime是安全的，
+                // 因为所有新进程都将从相似的基线开始。
+                base_vruntime = cpus[target_cpu].sched.min_vruntime;
+            }
+        } else {
+            // 如果目标CPU本身就是活跃的，那么它的min_vruntime就是最新的，直接使用即可。
+            base_vruntime = cpus[target_cpu].sched.min_vruntime;
+        }
+
+        u64 spread_offset = vruntime_spread_counter * 10;
         vruntime_spread_counter++;
         if (vruntime_spread_counter >= 100) {
             vruntime_spread_counter = 0;
         }
         
-        p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime + spread_offset;
+        p->schinfo.vruntime = base_vruntime + spread_offset;
+        // ===================== 修改结束 =====================
+        
         p->state = RUNNABLE;
     
         _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);

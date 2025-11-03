@@ -266,6 +266,8 @@ bool is_unused(Proc *p)
     return r;
 }
 
+// 文件: sched.c
+
 bool activate_proc(Proc *p)
 {   
     acquire_sched_lock(); 
@@ -286,13 +288,47 @@ bool activate_proc(Proc *p)
             }
         }
     
+        // ===================== 修改开始 =====================
+        u64 base_vruntime;
+        // 如果目标CPU是空闲的，它的min_vruntime可能是一个陈旧的、被抬高的值。
+        // 为了避免新进程受到不公平的惩罚，需要从其他活跃的CPU同步一个更合理的vruntime基线。
+        if (cpus[target_cpu].sched.task_count == 0) {
+            u64 global_min_vruntime = -1; // 使用-1代表无穷大
+            bool found_active_cpu = false;
+            for (int i = 0; i < NCPU; i++) {
+                // 只考虑那些有任务正在运行的CPU
+                if (cpus[i].sched.task_count > 0) {
+                    if (!found_active_cpu || cpus[i].sched.min_vruntime < global_min_vruntime) {
+                        global_min_vruntime = cpus[i].sched.min_vruntime;
+                    }
+                    found_active_cpu = true;
+                }
+            }
+
+            if (found_active_cpu) {
+                // 如果找到了活跃的CPU，就以它们中最小的min_vruntime作为基准
+                base_vruntime = global_min_vruntime;
+                // 同时，也更新这个空闲CPU的min_vruntime，使其与系统保持同步
+                cpus[target_cpu].sched.min_vruntime = global_min_vruntime;
+            } else {
+                // 如果所有CPU都空闲，那么使用目标CPU自己的min_vruntime是安全的，
+                // 因为所有新进程都将从相似的基线开始。
+                base_vruntime = cpus[target_cpu].sched.min_vruntime;
+            }
+        } else {
+            // 如果目标CPU本身就是活跃的，那么它的min_vruntime就是最新的，直接使用即可。
+            base_vruntime = cpus[target_cpu].sched.min_vruntime;
+        }
+
         u64 spread_offset = vruntime_spread_counter * 100000;
         vruntime_spread_counter++;
         if (vruntime_spread_counter >= 100) {
             vruntime_spread_counter = 0;
         }
         
-        p->schinfo.vruntime = cpus[target_cpu].sched.min_vruntime + spread_offset;
+        p->schinfo.vruntime = base_vruntime + spread_offset;
+        // ===================== 修改结束 =====================
+        
         p->state = RUNNABLE;
     
         _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
@@ -361,7 +397,7 @@ static void update_this_state(enum procstate new_state)
         // RUNNING -> RUNNABLE: 插入红黑树
         _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
         cpus[my_cpu].sched.queue_weight += WEIGHT(this->schinfo.nice);
-    } else if (new_state == ZOMBIE) {
+    } else if (new_state == ZOMBIE||new_state==SLEEPING) {
         cpus[my_cpu].sched.task_count--;
     }
 }
@@ -985,8 +1021,8 @@ int kill(int pid)
 #define NCPU 4
 
 // --- 新增/修改的宏 ---
-#define SCHED_TIMESLICE_MS 8         // 保留作为idle进程或只有一个任务时的默认时间片
-#define SCHED_LATENCY_MS 20          // 调度周期，单位：毫秒
+#define SCHED_TIMESLICE_MS 20         // 保留作为idle进程或只有一个任务时的默认时间片
+#define SCHED_LATENCY_MS 50          // 调度周期，单位：毫秒
 #define SCHED_MIN_GRANULARITY_MS 2   // 最小时间片，单位：毫秒
 
 struct sched {
@@ -1260,53 +1296,6 @@ void attach_pgdir(struct pgdir *pgdir)
         arch_set_ttbr0(K2P(&invalid_pt));
 }
 
-================================================================================
-#syscall.c
-
-#include <kernel/syscall.h>
-#include <kernel/sched.h>
-#include <kernel/printk.h>
-#include <common/sem.h>
-#include <test/test.h>
-#include <aarch64/intrinsic.h>
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Woverride-init"
-
-void *syscall_table[NR_SYSCALL] = {
-    [0 ... NR_SYSCALL - 1] = NULL,
-    [SYS_myreport] = (void *)syscall_myreport,
-};
-
-void syscall_entry(UserContext *context)
-{
-#ifdef lab3_debug1
-    printk("syscall.c:18 \n");
-#endif
-    // TODO
-    // Invoke syscall_table[id] with args and set the return value.
-    // id is stored in x8. args are stored in x0-x5. return value is stored in x0.
-    // be sure to check the range of id. if id >= NR_SYSCALL, panic.
-    u64 syscall_id=context->x[8];
-    if (syscall_id>=NR_SYSCALL){
-        PANIC();
-    }
-    void *func=syscall_table[syscall_id];
-    if (func==NULL){
-        PANIC();
-    }
-    typedef u64 (*func_call)(u64,u64,u64,u64,u64,u64);
-    func_call call=(func_call)func;
-    u64 x0=call(context->x[0],
-                context->x[1],
-                context->x[2],
-                context->x[3],
-                context->x[4],
-                context->x[5]);
-    context->x[0]=x0;
-}
-
-#pragma GCC diagnostic pop
 ================================================================================
 #trap.S
 
