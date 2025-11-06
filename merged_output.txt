@@ -320,7 +320,7 @@ bool activate_proc(Proc *p)
             base_vruntime = cpus[target_cpu].sched.min_vruntime;
         }
 
-        u64 spread_offset = vruntime_spread_counter * 100000;
+        u64 spread_offset = vruntime_spread_counter * 10;
         vruntime_spread_counter++;
         if (vruntime_spread_counter >= 100) {
             vruntime_spread_counter = 0;
@@ -1172,177 +1172,55 @@ void set_cpu_off()
 }
 
 ================================================================================
-#pt.c
+#core.c
 
-#include <kernel/pt.h>
-#include <kernel/mem.h>
-#include <common/string.h>
 #include <aarch64/intrinsic.h>
+#include <kernel/cpu.h>
+#include <kernel/printk.h>
+#include <kernel/sched.h>
+#include <test/test.h>
 
-PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc)
+volatile bool panic_flag;
+
+NO_RETURN void idle_entry()
 {
-    // TODO:
-    // Return a pointer to the PTE (Page Table Entry) for virtual address 'va'
-    // u64 page_base=PAGE_BASE(va);
-    // If the entry not exists (NEEDN'T BE VALID), allocate it if alloc=true, or return NULL if false.
-    PTEntriesPtr l0_table = pgdir->pt;
-    if (!l0_table){
-        if (!alloc){
-            return NULL;
+    set_cpu_on();
+    while (1) {
+        yield();
+        if (panic_flag)
+            break;
+        arch_with_trap
+        {
+            arch_wfi();
         }
-        l0_table=kalloc_page();
-        if (!l0_table){
-            return NULL;
-        }
-        pgdir->pt=l0_table;
     }
-
-    // 得到l1页表的地址
-    u64 idx0=VA_PART0(va);
-    PTEntry *pte0=&l0_table[idx0];
-    PTEntriesPtr l1_table;
-    if ((*pte0&PTE_TABLE)==PTE_TABLE){
-        l1_table=(PTEntriesPtr)P2K(PTE_ADDRESS(*pte0));
-    }else{
-        if (!alloc){
-            return NULL;
-        }
-        l1_table=kalloc_page();
-        if (l1_table==NULL){
-            return NULL;
-        }
-        *pte0=K2P(l1_table)|PTE_TABLE;
-    }
-
-    // 得到l2页表的位置
-    u64 idx1=VA_PART1(va);
-    PTEntry *pte1=&l1_table[idx1];
-    PTEntriesPtr l2_table;
-    if ((*pte1&PTE_TABLE)==PTE_TABLE){
-        l2_table=(PTEntriesPtr)P2K(PTE_ADDRESS(*pte1));
-    }else{
-        if (!alloc){
-            return NULL;
-        }
-        l2_table=kalloc_page();
-        if (l2_table==NULL){
-            return NULL;
-        }
-        *pte1=K2P(l2_table)|PTE_TABLE;
-    }
-
-    // 得到l3页表的位置
-    u64 idx2=VA_PART2(va);
-    PTEntry *pte2=&l2_table[idx2];
-    PTEntriesPtr l3_table;
-    if ((*pte2&PTE_TABLE)==PTE_TABLE){
-        l3_table=(PTEntriesPtr)P2K(PTE_ADDRESS(*pte2));
-    }else{
-        if (!alloc){
-            return NULL;
-        }
-        l3_table=kalloc_page();
-        if (l3_table==NULL){
-            return NULL;
-        }
-        *pte2=K2P(l3_table)|PTE_TABLE;
-    }
-
-    u64 idx3=VA_PART3(va);
-    return &l3_table[idx3];
-    // THIS ROUTINUE GETS THE PTE, NOT THE PAGE DESCRIBED BY PTE.
-    // Return Kernel Address.
+    set_cpu_off();
+    arch_stop_cpu();
 }
 
-void init_pgdir(struct pgdir *pgdir)
+NO_RETURN void kernel_entry()
 {
-    pgdir->pt = NULL;
+    printk("Hello world! (Core %lld)\n", cpuid());
+    // proc_test();
+    vm_test();
+    user_proc_test();
+
+    while (1)
+        yield();
 }
 
-void free_pgdir(struct pgdir *pgdir)
+NO_INLINE NO_RETURN void _panic(const char *file, int line)
 {
-    // TODO:
-    // Free pages used by the page table. If pgdir->pt=NULL, do nothing.
-    if (pgdir->pt==NULL)return;
-    // DONT FREE PAGES DESCRIBED BY THE PAGE TABLE
-    PTEntriesPtr l0_table = pgdir->pt;
-    for (u64 i=0;i<N_PTE_PER_TABLE;i++){
-        if ((l0_table[i]&PTE_TABLE)==PTE_TABLE){
-            PTEntriesPtr l1_table=(PTEntriesPtr)P2K(PTE_ADDRESS(l0_table[i]));
-            for (u64 j=0;j<N_PTE_PER_TABLE;j++){
-                if ((l1_table[j]&PTE_TABLE)==PTE_TABLE){
-                    PTEntriesPtr l2_table=(PTEntriesPtr)P2K(PTE_ADDRESS(l1_table[j]));
-                    for (u64 k=0;k<N_PTE_PER_TABLE;k++){
-                        if ((l2_table[k]&PTE_TABLE)==PTE_TABLE){
-                            PTEntriesPtr l3_table=(PTEntriesPtr)P2K(PTE_ADDRESS(l2_table[k]));
-                            kfree_page(l3_table);
-                        }
-                    }
-                    kfree_page(l2_table);
-                }
-            }
-            kfree_page(l1_table);
-        }
+    printk("=====%s:%d PANIC%lld!=====\n", file, line, cpuid());
+    panic_flag = true;
+    set_cpu_off();
+    for (int i = 0; i < NCPU; i++) {
+        if (cpus[i].online)
+            i--;
     }
-    kfree_page(l0_table);
+    printk("Kernel PANIC invoked at %s:%d. Stopped.\n", file, line);
+    arch_stop_cpu();
 }
-
-void attach_pgdir(struct pgdir *pgdir)
-{
-    extern PTEntries invalid_pt;
-    if (pgdir->pt)
-        arch_set_ttbr0(K2P(pgdir->pt));
-    else
-        arch_set_ttbr0(K2P(&invalid_pt));
-}
-
-================================================================================
-#trap.S
-
-#define pushp(a, b) stp a, b, [sp, #-0x10]!
-#define popp(a, b) ldp a, b, [sp], #0x10 
-
-/* `exception_vector.S` send all traps here. */
-.global trap_entry
-trap_entry:
-// TODO: save UserContext
-pushp(x16,x17)
-pushp(x14,x15)
-pushp(x12,x13)
-pushp(x10,x11)
-pushp(x8,x9)
-pushp(x6,x7)
-pushp(x4,x5)
-pushp(x2,x3)
-pushp(x0,x1)
-mrs x1,elr_el1
-mrs x0,spsr_el1
-pushp(x0,x1)
-mrs x0,sp_el0
-pushp(x0, xzr)
-mov x0,sp //UserContext指针
-bl trap_global_handler
- 
-.global trap_return
-trap_return:
-// TODO: restore UserContext
-
-popp(x0, x1)       // x0 = sp_el0, x1 = 0 (来自xzr)
-msr sp_el0, x0     // 恢复用户栈指针
-popp(x0,x1)
-msr spsr_el1,x0
-msr elr_el1,x1
-popp(x0,x1)
-popp(x2,x3)
-popp(x4,x5)
-popp(x6,x7)
-popp(x8,x9)
-popp(x10,x11)
-popp(x12,x13)
-popp(x14,x15)
-popp(x16,x17)
-eret
-
 ================================================================================
 #user_proc_test.c
 

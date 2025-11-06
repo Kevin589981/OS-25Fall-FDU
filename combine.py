@@ -24,9 +24,10 @@ if __name__ == "__main__":
         "src/kernel/proc.c",
         "src/kernel/cpu.h",
         "src/kernel/cpu.c",
-        "src/kernel/pt.c",
+        # "src/kernel/pt.c",
+        "src/kernel/core.c",
         # "src/kernel/syscall.c",
-        "src/aarch64/trap.S",
+        # "src/aarch64/trap.S",
         "src/test/user_proc_test.c",
         # "src/user/loop.S"
     ]

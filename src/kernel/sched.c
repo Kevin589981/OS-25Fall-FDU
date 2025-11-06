@@ -71,7 +71,7 @@ static Proc *pick_next();
 // 调度定时器处理函数（抢占式调度核心）
 static void sched_timer_handler(struct timer *timer)
 {
-    acquire_spinlock(&global_sched_lock);
+    acquire_sched_lock();
     
     Proc *current = thisproc();
     int cpu_id = cpuid();
@@ -96,7 +96,7 @@ static void sched_timer_handler(struct timer *timer)
                 swtch(next->kcontext, &current->kcontext);
             }
             
-            release_spinlock(&global_sched_lock);
+            release_sched_lock();
             return;
         } else {
             Proc *stolen = NULL;
@@ -129,13 +129,13 @@ static void sched_timer_handler(struct timer *timer)
                         attach_pgdir(&stolen->pgdir);
                         swtch(stolen->kcontext, &current->kcontext);
                         
-                        release_spinlock(&global_sched_lock);
+                        release_sched_lock();
                         return;
                     }
                 }
             }
             
-            release_spinlock(&global_sched_lock);
+            release_sched_lock();
             timer->elapse = SCHED_TIMESLICE_MS;
             set_cpu_timer(timer);
             return;
@@ -143,7 +143,7 @@ static void sched_timer_handler(struct timer *timer)
     }
     
     if (current->state != RUNNING) {
-        release_spinlock(&global_sched_lock);
+        release_sched_lock();
         timer->elapse = SCHED_TIMESLICE_MS;
         set_cpu_timer(timer);
         return;
@@ -168,7 +168,7 @@ static void sched_timer_handler(struct timer *timer)
     if (should_preempt) {
         sched(RUNNABLE);
     } else {
-        release_spinlock(&global_sched_lock);
+        release_sched_lock();
         // 修改：即使不抢占，也重新计算时间片并设置定时器
         timer->elapse = calculate_timeslice(current);
         set_cpu_timer(timer);
