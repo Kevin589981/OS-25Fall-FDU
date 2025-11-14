@@ -1,1176 +1,24 @@
-#sched.c
-
-#include <kernel/sched.h>
-#include <kernel/proc.h>
-#include <kernel/mem.h>
-#include <kernel/printk.h>
-#include <aarch64/intrinsic.h>
-#include <kernel/cpu.h>
-#include <common/rbtree.h>
-#include <kernel/debug.h>
-#include <common/string.h>
-#include <common/list.h>
-
-extern bool panic_flag;
-extern void swtch(KernelContext *new_ctx, KernelContext **old_ctx);
-u64 proc_entry(void (*entry)(u64), u64 arg);
-extern int idle_entry();
-extern Proc idle_procs[];
-
-#define PAGE_SIZE 4096
-#define NICE_0_LOAD 1024
-
-SpinLock global_sched_lock;
-
-// 每个CPU的调度定时器
-static struct timer sched_timers[NCPU];
-
-// 用于初始vruntime的展开，避免所有进程vruntime相同
-static u64 vruntime_spread_counter = 0;
-static u64 calculate_timeslice(Proc *p)
-{
-    int cpu_id = cpuid();
-    struct sched *s = &cpus[cpu_id].sched;
-
-    // 如果是idle进程或者当前CPU只有一个可运行任务，则给予一个固定的默认时间片
-    if (p->idle || s->task_count <= 1) {
-        return SCHED_TIMESLICE_MS;
-    }
-
-    // 总权重 = 运行队列中的进程权重 + 即将运行的当前进程的权重
-    u64 total_weight = s->queue_weight + WEIGHT(p->schinfo.nice);
-    u64 timeslice;
-
-    // 根据权重比例计算理想时间片
-    // 注意：为保证计算精度，先乘后除
-    timeslice = (u64)SCHED_LATENCY_MS * WEIGHT(p->schinfo.nice) / total_weight;
-
-    // 确保时间片不小于最小粒度
-    if (timeslice < SCHED_MIN_GRANULARITY_MS) {
-        return SCHED_MIN_GRANULARITY_MS;
-    }
-
-    return timeslice;
-}
-
-// 红黑树比较函数：按vruntime排序
-static bool rb_proc_less(struct rb_node_ *lnode, struct rb_node_ *rnode)
-{
-    Proc *lproc = container_of(lnode, Proc, schinfo.node);
-    Proc *rproc = container_of(rnode, Proc, schinfo.node);
-    
-    // vruntime小的在左边
-    if (lproc->schinfo.vruntime < rproc->schinfo.vruntime)
-        return true;
-    if (lproc->schinfo.vruntime > rproc->schinfo.vruntime)
-        return false;
-    // vruntime相同时按pid排序，保证确定性
-    return lproc->pid < rproc->pid;
-}
-static void update_this_proc(Proc *p);
-static Proc *pick_next();
-
-// 调度定时器处理函数（抢占式调度核心）
-static void sched_timer_handler(struct timer *timer)
-{
-    acquire_spinlock(&global_sched_lock);
-    
-    Proc *current = thisproc();
-    int cpu_id = cpuid();
-    struct rb_root_ *queue = &cpus[cpu_id].sched.run_queue;
-    struct rb_node_ *leftmost = _rb_first(queue);
-    
-    if (current->idle) {
-        if (leftmost) {
-            auto next = pick_next();
-            update_this_proc(next);
-            ASSERT(next->state == RUNNABLE || next->idle);
-            
-            next->state = RUNNING;
-            next->schinfo.start_exec_time = get_timestamp();
-            
-            // 修改：根据nice值计算时间片
-            sched_timers[cpu_id].elapse = calculate_timeslice(next);
-            set_cpu_timer(&sched_timers[cpu_id]);
-            
-            if (next != current) {
-                attach_pgdir(&next->pgdir);
-                swtch(next->kcontext, &current->kcontext);
-            }
-            
-            release_spinlock(&global_sched_lock);
-            return;
-        } else {
-            Proc *stolen = NULL;
-            for (int i = 1; i < NCPU; i++) {
-                int target_cpu_id = (cpu_id + i) % NCPU;
-                struct rb_root_ *other_queue = &cpus[target_cpu_id].sched.run_queue;
-                
-                if (cpus[target_cpu_id].sched.task_count > 1) {
-                    struct rb_node_ *leftmost_other = _rb_first(other_queue);
-                    if (leftmost_other) {
-                        stolen = container_of(leftmost_other, Proc, schinfo.node);
-                        _rb_erase(leftmost_other, other_queue);
-                        cpus[target_cpu_id].sched.task_count--;
-                        // 修改：更新被窃取CPU的queue_weight
-                        cpus[target_cpu_id].sched.queue_weight -= WEIGHT(stolen->schinfo.nice);
-                        
-                        if (stolen->schinfo.vruntime < cpus[cpu_id].sched.min_vruntime) {
-                            stolen->schinfo.vruntime = cpus[cpu_id].sched.min_vruntime;
-                        }
-                        cpus[cpu_id].sched.task_count++;
-                        
-                        update_this_proc(stolen);
-                        stolen->state = RUNNING;
-                        stolen->schinfo.start_exec_time = get_timestamp();
-                        
-                        // 修改：根据nice值计算时间片
-                        sched_timers[cpu_id].elapse = calculate_timeslice(stolen);
-                        set_cpu_timer(&sched_timers[cpu_id]);
-                        
-                        attach_pgdir(&stolen->pgdir);
-                        swtch(stolen->kcontext, &current->kcontext);
-                        
-                        release_spinlock(&global_sched_lock);
-                        return;
-                    }
-                }
-            }
-            
-            release_spinlock(&global_sched_lock);
-            timer->elapse = SCHED_TIMESLICE_MS;
-            set_cpu_timer(timer);
-            return;
-        }
-    }
-    
-    if (current->state != RUNNING) {
-        release_spinlock(&global_sched_lock);
-        timer->elapse = SCHED_TIMESLICE_MS;
-        set_cpu_timer(timer);
-        return;
-    }
-    
-    u64 current_time = get_timestamp();
-    if (current->schinfo.start_exec_time > 0) {
-        u64 delta_exec = current_time - current->schinfo.start_exec_time;
-        if (delta_exec > 0) {
-            int weight = WEIGHT(current->schinfo.nice);
-            u64 delta_vruntime = (delta_exec * NICE_0_LOAD) / weight;
-            current->schinfo.vruntime += delta_vruntime;
-        }
-    }
-    
-    // 检查是否需要抢占
-    bool should_preempt = false;
-    if (leftmost) {
-        should_preempt = true;
-    }
-    
-    if (should_preempt) {
-        sched(RUNNABLE);
-    } else {
-        release_spinlock(&global_sched_lock);
-        // 修改：即使不抢占，也重新计算时间片并设置定时器
-        timer->elapse = calculate_timeslice(current);
-        set_cpu_timer(timer);
-    }
-}
-
-void create_idle_proc()
-{
-    for (int i = 0; i < NCPU; i++) {
-        cpus[i].sched.idle = &idle_procs[i];
-        Proc *p = &idle_procs[i];
-        p->state = RUNNING;
-        p->idle = TRUE;
-        p->pid = -1 - i;
-        p->kstack = NULL;
-        p->parent = NULL;
-        p->ucontext = NULL;
-        p->kcontext = NULL;
-
-        cpus[i].sched.current_proc = p;
-        cpus[i].sched.idle = p;
-    }
-}
-
-void init_sched()
-{
-    create_idle_proc();
-    
-    init_spinlock(&global_sched_lock);
-    
-    for (int i = 0; i < NCPU; i++) {
-        struct sched *s = &cpus[i].sched;
-        s->run_queue.rb_node = NULL;
-        s->task_count = 0;
-        s->min_vruntime = 0;
-        s->queue_weight = 0; // 修改：初始化queue_weight
-        // cpus[i].zombie_to_reap = kalloc(sizeof(KernelContext));
-        
-        memset(&sched_timers[i], 0, sizeof(struct timer));
-        sched_timers[i].elapse = SCHED_TIMESLICE_MS;
-        sched_timers[i].handler = sched_timer_handler;
-        sched_timers[i].data = i; 
-        sched_timers[i].triggered = true; 
-        sched_timers[i]._node.rb_left = NULL;
-        sched_timers[i]._node.rb_right = NULL;
-        sched_timers[i]._node.__rb_parent_color = 0;
-    }
-    
-    vruntime_spread_counter = 0;
-}
-
-Proc *thisproc()
-{
-    int id = cpuid();
-    return cpus[id].sched.current_proc;
-}
-
-void init_schinfo(struct schinfo *p)
-{
-    p->vruntime = 0;
-    p->nice = 0;
-    p->start_exec_time = 0;
-    p->node.rb_left = NULL;
-    p->node.rb_right = NULL;
-    p->node.__rb_parent_color = 0;
-}
-
-void acquire_sched_lock()
-{
-    acquire_spinlock(&global_sched_lock);
-}
-
-void release_sched_lock()
-{
-    release_spinlock(&global_sched_lock);
-}
-
-bool is_zombie(Proc *p)
-{
-    bool r;
-    acquire_sched_lock();
-    r = p->state == ZOMBIE;
-    release_sched_lock();
-    return r;
-}
-
-bool is_unused(Proc *p)
-{
-    bool r;
-    acquire_sched_lock();
-    r = p->state == UNUSED;
-    release_sched_lock();
-    return r;
-}
-
-// 文件: sched.c
-
-bool activate_proc(Proc *p)
-{   
-    acquire_sched_lock(); 
-    
-    if (p->state == RUNNING || p->state == RUNNABLE) {
-        release_sched_lock(); 
-        return false;
-    }
-    
-    else if (p->state == SLEEPING || p->state == UNUSED) {
-        int target_cpu = 0;
-        u64 min_count = cpus[0].sched.task_count;
-        
-        for (int i = 1; i < NCPU; i++) {
-            if (cpus[i].sched.task_count < min_count) {
-                min_count = cpus[i].sched.task_count;
-                target_cpu = i;
-            }
-        }
-    
-        // ===================== 修改开始 =====================
-        u64 base_vruntime;
-        // 如果目标CPU是空闲的，它的min_vruntime可能是一个陈旧的、被抬高的值。
-        // 为了避免新进程受到不公平的惩罚，需要从其他活跃的CPU同步一个更合理的vruntime基线。
-        if (cpus[target_cpu].sched.task_count == 0) {
-            u64 global_min_vruntime = -1; // 使用-1代表无穷大
-            bool found_active_cpu = false;
-            for (int i = 0; i < NCPU; i++) {
-                // 只考虑那些有任务正在运行的CPU
-                if (cpus[i].sched.task_count > 0) {
-                    if (!found_active_cpu || cpus[i].sched.min_vruntime < global_min_vruntime) {
-                        global_min_vruntime = cpus[i].sched.min_vruntime;
-                    }
-                    found_active_cpu = true;
-                }
-            }
-
-            if (found_active_cpu) {
-                // 如果找到了活跃的CPU，就以它们中最小的min_vruntime作为基准
-                base_vruntime = global_min_vruntime;
-                // 同时，也更新这个空闲CPU的min_vruntime，使其与系统保持同步
-                cpus[target_cpu].sched.min_vruntime = global_min_vruntime;
-            } else {
-                // 如果所有CPU都空闲，那么使用目标CPU自己的min_vruntime是安全的，
-                // 因为所有新进程都将从相似的基线开始。
-                base_vruntime = cpus[target_cpu].sched.min_vruntime;
-            }
-        } else {
-            // 如果目标CPU本身就是活跃的，那么它的min_vruntime就是最新的，直接使用即可。
-            base_vruntime = cpus[target_cpu].sched.min_vruntime;
-        }
-
-        u64 spread_offset = vruntime_spread_counter * 10;
-        vruntime_spread_counter++;
-        if (vruntime_spread_counter >= 100) {
-            vruntime_spread_counter = 0;
-        }
-        
-        p->schinfo.vruntime = base_vruntime + spread_offset;
-        // ===================== 修改结束 =====================
-        
-        p->state = RUNNABLE;
-    
-        _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
-        cpus[target_cpu].sched.task_count++;
-        // 修改：更新queue_weight
-        cpus[target_cpu].sched.queue_weight += WEIGHT(p->schinfo.nice);
-    
-        release_sched_lock();
-        return true;
-    }
-    else if (p->state == ZOMBIE){
-        release_sched_lock();
-        return false;
-    }
-
-    release_sched_lock();
-    PANIC();
-    return false;
-}
-
-
-// 更新当前进程的vruntime
-static void update_vruntime(Proc *p, u64 current_time)
-{
-    if (p->idle) return;
-    
-    if (p->schinfo.start_exec_time == 0) {
-        p->schinfo.start_exec_time = current_time;
-        return;
-    }
-    
-    u64 delta_exec = current_time - p->schinfo.start_exec_time;
-    if (delta_exec > 0) {
-        // vruntime增量 = 实际运行时间 * NICE_0_LOAD / weight
-        int weight = WEIGHT(p->schinfo.nice);
-        u64 delta_vruntime = (delta_exec * NICE_0_LOAD) / weight;
-        p->schinfo.vruntime += delta_vruntime;
-    }
-    
-    p->schinfo.start_exec_time = current_time;
-}
-
-static void update_this_state(enum procstate new_state)
-{
-    Proc *this = thisproc();
-    if (this->idle) {
-        // idle进程保持RUNNING状态，不参与调度队列
-        this->state = RUNNING;
-        return;
-    }
-    
-    int my_cpu = cpuid();
-    u64 current_time = get_timestamp();
-    
-    // 更新vruntime
-    update_vruntime(this, current_time);
-    
-    // 更新min_vruntime
-    if (this->schinfo.vruntime > cpus[my_cpu].sched.min_vruntime) {
-        cpus[my_cpu].sched.min_vruntime = this->schinfo.vruntime;
-    }
-    
-    this->state = new_state;
-    
-    if (new_state == RUNNABLE) {
-        // RUNNING -> RUNNABLE: 插入红黑树
-        _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
-        cpus[my_cpu].sched.queue_weight += WEIGHT(this->schinfo.nice);
-    } else if (new_state == ZOMBIE||new_state==SLEEPING) {
-        cpus[my_cpu].sched.task_count--;
-    }
-}
-
-static Proc *pick_next()
-{
-    if (panic_flag) return cpus[cpuid()].sched.idle;
-    
-    int my_cpu = cpuid();
-    struct rb_root_ *my_queue = &cpus[my_cpu].sched.run_queue;
-    Proc *next_proc = NULL;
-    
-    // 从红黑树中选择最左节点（vruntime最小）
-    struct rb_node_ *leftmost = _rb_first(my_queue);
-    
-    if (leftmost) {
-        next_proc = container_of(leftmost, Proc, schinfo.node);
-        _rb_erase(leftmost, my_queue);
-        cpus[my_cpu].sched.queue_weight -= WEIGHT(next_proc->schinfo.nice);
-        return next_proc;
-    }
-    
-    // 当前队列为空，尝试工作窃取
-    Proc *stolen = NULL;
-    for (int i = 0; i < NCPU; i++) {
-        int target_cpu_id = (my_cpu + i + 1) % NCPU;
-        if (target_cpu_id == my_cpu) continue;
-    
-        struct rb_root_ *other_queue = &cpus[target_cpu_id].sched.run_queue;
-        if (cpus[target_cpu_id].sched.task_count > 1) { // 只从有多个任务的CPU窃取
-            struct rb_node_ *leftmost_other = _rb_first(other_queue);
-            if (leftmost_other) {
-                stolen = container_of(leftmost_other, Proc, schinfo.node);
-                _rb_erase(leftmost_other, other_queue);
-                cpus[target_cpu_id].sched.task_count--;
-                cpus[target_cpu_id].sched.queue_weight -= WEIGHT(stolen->schinfo.nice);
-                break;
-            }
-        }
-    }
-    
-    if (stolen) {
-        // 调整vruntime以适应本地CPU的min_vruntime
-        if (stolen->schinfo.vruntime < cpus[my_cpu].sched.min_vruntime) {
-            stolen->schinfo.vruntime = cpus[my_cpu].sched.min_vruntime;
-        }
-        cpus[my_cpu].sched.task_count++;
-        return stolen;
-    }
-    
-    return cpus[my_cpu].sched.idle;
-}
-
-static void update_this_proc(Proc *p)
-{
-    cpus[cpuid()].sched.current_proc = p;
-}
-
-void sched(enum procstate new_state)
-{
-    ASSERT(global_sched_lock.locked == 1);
-    
-    auto this = thisproc();
-    int my_cpu = cpuid();
-    
-    if (this->killed && new_state != ZOMBIE) {
-        release_sched_lock();
-        return;
-    }
-    
-    ASSERT(this->state == RUNNING);
-    
-    // 取消当前CPU的调度定时器
-    if (!sched_timers[my_cpu].triggered) {
-        cancel_cpu_timer(&sched_timers[my_cpu]);
-        sched_timers[my_cpu].triggered = true;
-    }
-    
-    update_this_state(new_state);
-    
-    auto next = pick_next();
-    
-    update_this_proc(next);
-    ASSERT(next->state == RUNNABLE || next->idle);
-    
-    next->state = RUNNING;
-    next->schinfo.start_exec_time = get_timestamp();
-    
-    // 为新进程设置调度定时器（包括idle进程）
-    sched_timers[my_cpu].elapse = calculate_timeslice(next);
-    set_cpu_timer(&sched_timers[my_cpu]);
-    
-    if (next != this) {
-        attach_pgdir(&next->pgdir);
-        swtch(next->kcontext, &this->kcontext);
-    }
-
-    release_sched_lock();
-}
-
-void trap_return(u64);
-
-u64 proc_entry(void (*entry)(u64), u64 arg)
-{
-    // 新启动的进程继承了调度器的锁，需要在这里释放
-    release_sched_lock();
-    
-    set_return_addr(entry);
-    return arg;
-}
-================================================================================
-#proc.h
+#core.h
 
 #pragma once
-
 #include <common/defines.h>
-#include <common/list.h>
-#include <common/sem.h>
-#include <common/rbtree.h>
-#include <kernel/pt.h>
 
-enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, ZOMBIE };
-
-typedef struct UserContext {
-    u64 sp, useless;
-    u64 spsr, elr;
-    u64 x[18];
-} UserContext;
-
-typedef struct KernelContext {
-    u64 lr, x0, x1;
-    u64 x[11];
-} KernelContext;
-
-// embeded data for procs
-struct schinfo {
-    u64 vruntime;
-    struct rb_node_ node;  // 改为红黑树节点
-    int nice;              // -20 到 19
-    u64 start_exec_time;
-};
-
-extern int prio_to_weight[];
-#define WEIGHT(priority) prio_to_weight[priority+20]
-#define NICE_0_LOAD 1024
-
-typedef struct Proc {
-    bool killed;
-    bool idle;
-    int pid;
-    int exitcode;
-    enum procstate state;
-    Semaphore childexit;
-    ListNode children;
-    ListNode ptnode;
-    struct Proc *parent;
-    struct schinfo schinfo;
-    struct pgdir pgdir;
-    void *kstack;
-    UserContext *ucontext;
-    KernelContext *kcontext;
-    SpinLock lock;
-} Proc;
-
-void init_kproc();
-void init_proc(Proc *);
-Proc *create_proc();
-int start_proc(Proc *, void (*entry)(u64), u64 arg);
-NO_RETURN void exit(int code);
-int wait(int *exitcode);
-int kill(int pid);
-
-#define MAX_PID 4096 // 定义系统支持的最大PID数量，可以根据需求调整
-#define BITS_PER_LONG (sizeof(unsigned long) * 8)
-#define BITMAP_SIZE (MAX_PID / BITS_PER_LONG)
-
-// 全局PID位图
-extern unsigned long pid_bitmap[BITMAP_SIZE];
-================================================================================
-#proc.c
-
-#include <kernel/proc.h>
-#include <kernel/mem.h>
-#include <kernel/sched.h>
-#include <aarch64/mmu.h>
-#include <common/list.h>
-#include <common/string.h>
-#include <kernel/printk.h>
-#include <kernel/debug.h>
-#include <kernel/core.h>
-#include <kernel/cpu.h>
-#ifndef NCPU
-#define NCPU 4
-#endif
-Proc root_proc;
-
-void kernel_entry();
-u64 proc_entry();
-
-SpinLock global_process_lock;
-int prio_to_weight[40]={
-    /* -20 */     88761,     71755,     56483,     46273,     36291,
-    /* -15 */     29154,     23254,     18705,     14949,     11916,
-    /* -10 */      9548,      7620,      6100,      4904,      3906,
-    /*  -5 */      3121,      2501,      1991,      1586,      1277,
-    /*   0 */      1024,       820,       655,       526,       423,
-    /*   5 */       335,       272,       215,       172,       137,
-    /*  10 */       110,        87,        70,        56,        45,
-    /*  15 */        36,        29,        23,        18,        15,
-}; 
-// unsigned long pid_bitmap[BITMAP_SIZE];
-
-// // 用于记录下一次开始搜索空闲PID的位置，以提高效率
-// static int next_pid_to_check = 0;
-
-// // 初始化PID分配器
-// void init_pid_allocator() {
-//     // 初始化位图，将所有位清零，表示所有PID都未被分配
-//     memset(pid_bitmap, 0, sizeof(pid_bitmap));
-//     next_pid_to_check = 0;
-//     // 保留PID 0
-//     // set_bit(0, pid_bitmap);
-// }
-
-// // 回收一个PID
-// void pid_recycler(int pid) {
-//     if (pid < 0 || pid >= MAX_PID) {
-//         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
-//         return;
-//     }
-
-// #ifdef PID_DEBUG
-//     printk("Recycling PID: %d\n", pid);
-// #endif
-
-//     // 使用原子操作或在锁保护下清除对应位
-//     // 这里我们假设它会在 global_process_lock 的保护下被调用
-//     int index = pid / BITS_PER_LONG;
-//     int offset = pid % BITS_PER_LONG;
-//     pid_bitmap[index] &= ~(1UL << offset);
-// }
-
-// // 分配一个PID
-// int pid_allocator() {
-//     // 假设此函数总是在 global_process_lock 保护下调用
-    
-//     // 从上次检查的位置开始循环查找
-//     for (int i = 0; i < MAX_PID; ++i) {
-//         int pid = (next_pid_to_check + i) % MAX_PID;
-//         if (pid == 0) continue; // 跳过PID 0
-
-//         int index = pid / BITS_PER_LONG;
-//         int offset = pid % BITS_PER_LONG;
-
-//         // 检查该位是否为0 (未被占用)
-//         if (!(pid_bitmap[index] & (1UL << offset))) {
-//             // 标记该位为1 (已占用)
-//             pid_bitmap[index] |= (1UL << offset);
-            
-//             // 更新下一次开始搜索的位置
-//             next_pid_to_check = pid + 1;
-//             if (next_pid_to_check >= MAX_PID) {
-//                 next_pid_to_check = 1; // 回到开头
-//             }
-            
-//             return pid;
-//         }
-//     }
-
-//     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
-//     return -1; // 返回错误码
-// }
-unsigned long pid_bitmap[BITMAP_SIZE];
-
-// 用于记录下一次开始搜索空闲PID的位置，以提高效率
-static int next_pid_to_check = 1;
-
-// 初始化PID分配器
-void init_pid_allocator() {
-    // 初始化位图，将所有位清零，表示所有PID都未被分配
-    memset(pid_bitmap, 0, sizeof(pid_bitmap));
-    next_pid_to_check = 1;
-    pid_bitmap[0] |= 1UL; 
-}
-
-// 回收一个PID (此函数已是O(1)，无需修改)
-void pid_recycler(int pid) {
-    if (pid <= 0 || pid >= MAX_PID) {
-        printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
-        return;
-    }
-
-#ifdef PID_DEBUG
-    printk("Recycling PID: %d\n", pid);
-#endif
-
-    int index = pid / BITS_PER_LONG;
-    int offset = pid % BITS_PER_LONG;
-    pid_bitmap[index] &= ~(1UL << offset);
-}
-
-//==============================================================================
-//           分配一个PID (使用 AArch64 内联汇编优化)
-//==============================================================================
-int pid_allocator() {
-    // 假设此函数总是在锁保护下调用
-
-    // 从上次检查的字开始，遍历整个位图
-    usize start_index = (next_pid_to_check / BITS_PER_LONG) % BITMAP_SIZE;
-
-    for (usize i = 0; i < BITMAP_SIZE; ++i) {
-        int index = (start_index + i) % BITMAP_SIZE;
-        unsigned long word = pid_bitmap[index];
-
-        // 优化: 如果这个字的所有位都已设置 (全满)，则快速跳过。
-        if (word == ~0UL) {
-            continue;
-        }
-
-        // 找到了一个不满的字，现在使用硬件指令来快速找到第一个0位。
-        unsigned long inverted_word = ~word;
-        unsigned long offset;
-
-        // 使用AArch64内联汇编计算尾随零的数量(Count Trailing Zeros)
-        // 相当于找到 inverted_word 中第一个为1的位的索引
-        asm volatile (
-            "rbit %0, %1\n\t"  // 1. 将位的顺序颠倒
-            "clz  %0, %0\n\t"  // 2. 计算颠倒后数字的前导零数量
-            : "=r" (offset)    // 输出: offset ('='表示写入, 'r'表示通用寄存器)
-            : "r" (inverted_word) // 输入: inverted_word ('r'表示通用寄存器)
-        );
-
-        // 计算最终的PID
-        int pid = index * BITS_PER_LONG + offset;
-
-        // 边界检查: 确保计算出的PID没有超过最大限制
-        // 这在最后一个字不是完整填充的情况下很重要
-        if (pid >= MAX_PID) {
-            continue; // 继续搜索下一个可能的字
-        }
-        
-        // 找到了一个有效的、空闲的PID
-
-        // 标记该位为1 (已占用)
-        pid_bitmap[index] |= (1UL << offset);
-
-        // 更新下一次开始搜索的位置，以实现轮转效果
-        next_pid_to_check = pid + 1;
-        if (next_pid_to_check >= MAX_PID) {
-            next_pid_to_check = 1; // 回到开头 (跳过PID 0)
-        }
-
-        return pid;
-    }
-
-    // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
-    return -1; // 返回错误码
-}
-
-
-
-
-Proc idle_procs[NCPU];
-
-void init_kproc()
-{
-    init_spinlock(&global_process_lock);
-    init_pid_allocator();
-    
-    // 2. init the root_proc (finished)
-
-    init_proc(&root_proc);
-    root_proc.parent = &root_proc;
-    start_proc(&root_proc, kernel_entry, 123456);
-}
-
-void init_proc(Proc *p)
-{   
-    acquire_spinlock(&global_process_lock);
-    memset(p, 0, sizeof(Proc));
-
-    init_sem(&p->childexit, 1);
-    init_list_node(&p->children);
-    init_list_node(&p->ptnode);
-    p->idle = FALSE;
-    p->exitcode = 0;
-    p->killed = FALSE;
-    p->parent = NULL;
-    p->pid = pid_allocator();
-    if (p->pid==-1){
-        kfree(p);
-        release_spinlock(&global_process_lock);
-        printk("PID used out\n");
-        PANIC();
-    }
-    init_pgdir(&p->pgdir);
-    p->state = UNUSED;
-    p->kstack = kalloc_page();
-    init_spinlock(&p->lock);
-    init_schinfo(&p->schinfo);
-    
-    if (p->kstack == NULL) {
-        PANIC();
-    }
-    memset(p->kstack, 0, PAGE_SIZE);
-    p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext));
-    p->kcontext = (KernelContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext)- sizeof(KernelContext));
-    
-
-    release_spinlock(&global_process_lock);
-}
-
-Proc *create_proc()
-{
-    Proc *p = kalloc(sizeof(Proc));
-    if (p==NULL){
-        PANIC();
-    }
-    init_proc(p);
-    return p;
-}
-
-void set_parent_to_this(Proc *proc)
-{
-    acquire_spinlock(&global_process_lock);
-    Proc *parent=thisproc();
-    _detach_from_list(&proc->ptnode);
-    proc->parent=parent;
-    _insert_into_list(parent->children.prev,&proc->ptnode);
-    release_spinlock(&global_process_lock);
-}
-
-int start_proc(Proc *p, void (*entry)(u64), u64 arg)
-{
-    // TODO:
-    // 1. set the parent to root_proc if NULL
-    acquire_spinlock(&global_process_lock);
-    if (p->parent==NULL){
-        
-        p->parent=&root_proc;
-        _detach_from_list(&p->ptnode);
-        _insert_into_list(root_proc.children.prev, &p->ptnode);
-        
-    }
-    
-    p->kcontext->lr=(u64)&proc_entry;
-    p->kcontext->x0=(u64)entry;
-    p->kcontext->x1=(u64)arg;
-    
-    p->state=UNUSED;
-    int id =p->pid;
-    activate_proc(p);//activate函数内部有锁
-    // NOTE: be careful of concurrency
-#ifdef PID_DEBUG
-    printk("cpuid: %lld, start pid: %d, its parent is %d\n",cpuid(),p->pid,p->parent->pid);
-#endif
-    release_spinlock(&global_process_lock);
-    return id;
-}
-
-int wait(int *exitcode)
-{
-    while (1){
-        Proc *parent=thisproc();
-        acquire_spinlock(&global_process_lock);
-        
-        bool has_children = !_empty_list(&parent->children);
-        if (!has_children){
-            release_spinlock(&global_process_lock);
-#ifdef PID_DEBUG
-            printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
-#endif
-            return -1;
-        }
-
-        Proc *zombie_child=NULL;
-        _for_in_list(node, &parent->children) {
-            if (node==&parent->children){
-                continue;
-            }
-            Proc *p = container_of(node, Proc, ptnode);
-            if (is_zombie(p)) {
-                zombie_child = p;
-#ifdef PID_DEBUG
-                printk("Found zombie child pid: %d\n", p->pid);
-#endif
-                break;
-            }
-        }
-        
-        if (zombie_child){
-            if (exitcode!=NULL){
-                *exitcode=zombie_child->exitcode;
-            }
-            int child_pid=zombie_child->pid;
-            pid_recycler(child_pid);
-            if (zombie_child->kstack){
-                kfree_page(zombie_child->kstack);
-            }
-            _detach_from_list(&zombie_child->ptnode);
-            kfree(zombie_child);
-            release_spinlock(&global_process_lock);
-            return child_pid;
-        }
-
-        release_spinlock(&global_process_lock);
-        wait_sem(&parent->childexit);
-    }
-}
-
-NO_RETURN void exit(int code)
-{
-    
-     
-        // TODO:
-    // 1. set the exitcode
-    // 2. clean up the resources
-    // 3. transfer children to the root_proc, and notify the root_proc if there is zombie
-    // 4. sched(ZOMBIE)
-    // NOTE: be careful of concurrency
-
-    acquire_spinlock(&global_process_lock);
-    Proc *p=thisproc();
-#ifdef debug_sched
-    printk("proc.c:224, p->state is %d\n",p->state);
-#endif
-    p->exitcode=code;
-    
-    // 将所有子进程过继给root_proc
-    ListNode orphaned_children;
-    init_list_node(&orphaned_children);
-    while (!_empty_list(&p->children)) {
-        ListNode *child_node = p->children.next;
-        _detach_from_list(child_node);
-        _insert_into_list(orphaned_children.prev, child_node);
-    }
-    while (!_empty_list(&orphaned_children)) {
-        ListNode *child_node = orphaned_children.next;
-        _detach_from_list(child_node);
-        _insert_into_list(root_proc.children.prev, child_node);
-        Proc *child = container_of(child_node, Proc, ptnode);
-        child->parent = &root_proc;
-        if (is_zombie(child)) {
-            if ((u64)&root_proc<0x20){
-                printk("Error proc.c: 312\n");
-            }
-            post_sem(&root_proc.childexit);
-        }
-    }
-    ASSERT(p->parent!=NULL);
-    if (!p->parent){
-        p->parent=&root_proc;
-        _detach_from_list(&p->ptnode);
-        _insert_into_list(root_proc.children.prev, &p->ptnode);
-    }
-
-    if ((u64)p->parent<0x20){
-        printk("BUG at proc.c :325\n");
-        PANIC();
-    }
-    free_pgdir(&p->pgdir);
-    post_sem(&p->parent->childexit);
-
-    // 不在此处获取调度锁，sched()函数会自己处理
-    acquire_sched_lock(); 
-    
-    // acquire_spinlock(&p->lock);
-
-    release_spinlock(&global_process_lock);
-    
-    // printk("Ready to Enter zombie, Proc %d, cpu %lld\n",p->pid,cpuid());
-    sched(ZOMBIE);
-    printk("exit: sched(ZOMBIE) should not return");
-    PANIC();
-}
-
-Proc *find_to_kill(int pid, Proc *parent){
-    if (parent->pid==pid){
-        if (parent->state==UNUSED){
-            return NULL;
-        }
-        return parent;
-    }
-    _for_in_list(node,&parent->children){
-        if (node==&parent->children)continue;
-        Proc *child=container_of(node, Proc, ptnode);
-        Proc *find=find_to_kill(pid, child);
-        if (find) return find;
-    }
-    return NULL;
-}
-
-int kill(int pid)
-{
-    // TODO:
-    // Set the killed flag of the proc to true and return 0.
-    // Return -1 if the pid is invalid (proc not found).
-    acquire_spinlock(&global_process_lock);
-    // printk("try to kill %d\n",pid);
-    Proc *target=find_to_kill(pid, &root_proc);
-    // printk("find kill target %d\n",pid);
-    if (!target){
-        release_spinlock(&global_process_lock);
-        return -1;
-    }
-    target->killed=true;
-    activate_proc(target);
-    release_spinlock(&global_process_lock);
-    
-    return 0;
-}
-================================================================================
-#cpu.h
-
-#pragma once
-
-#include <kernel/proc.h>
-#include <common/rbtree.h>
-#include <common/list.h>
-
-#define NCPU 4
-
-// --- 新增/修改的宏 ---
-#define SCHED_TIMESLICE_MS 20         // 保留作为idle进程或只有一个任务时的默认时间片
-#define SCHED_LATENCY_MS 50          // 调度周期，单位：毫秒
-#define SCHED_MIN_GRANULARITY_MS 2   // 最小时间片，单位：毫秒
-
-struct sched {
-    struct rb_root_ run_queue;  // 红黑树存储RUNNABLE进程
-    u64 task_count;
-    u64 min_vruntime;
-    u64 queue_weight;           // 新增：记录在run_queue中的所有进程的权重之和
-    struct Proc* current_proc; // 当前RUNNING进程
-    struct Proc* idle;
-};
-
-struct cpu {
-    bool online;
-    struct rb_root_ timer;
-    struct sched sched;
-    // KernelContext *zombie_to_reap;
-};
-
-extern SpinLock global_sched_lock;
-extern struct cpu cpus[NCPU];
-
-struct timer {
-    bool triggered;
-    int elapse;
-    u64 _key;
-    struct rb_node_ _node;
-    void (*handler)(struct timer *);
-    u64 data;
-};
-
-void init_clock_handler();
-
-void set_cpu_on();
-void set_cpu_off();
-
-void set_cpu_timer(struct timer *timer);
-void cancel_cpu_timer(struct timer *timer);
-================================================================================
-#cpu.c
-
-#include <kernel/cpu.h>
-#include <kernel/printk.h>
-#include <kernel/sched.h>
-#include <kernel/proc.h>
-#include <aarch64/mmu.h>
-#include <driver/timer.h>
-#include <driver/clock.h>
-
-struct cpu cpus[NCPU];
-
-static bool __timer_cmp(rb_node lnode, rb_node rnode)
-{
-    i64 d = container_of(lnode, struct timer, _node)->_key -
-            container_of(rnode, struct timer, _node)->_key;
-    if (d < 0)
-        return true;
-    if (d == 0)
-        return lnode < rnode;
-    return false;
-}
-
-static void __timer_set_clock()
-{
-    auto node = _rb_first(&cpus[cpuid()].timer);
-    if (!node) {
-        // printk("cpu %lld set clock 1000, no timer left\n", cpuid());
-        reset_clock(1000);
-        return;
-    }
-    auto t1 = container_of(node, struct timer, _node)->_key;
-    auto t0 = get_timestamp_ms();
-    if (t1 <= t0)
-        reset_clock(0);
-    else
-        reset_clock(t1 - t0);
-    // printk("cpu %lld set clock %lld\n", cpuid(), t1 - t0);
-}
-
-static void timer_clock_handler()
-{
-    reset_clock(1000);
-    // printk("cpu %lld aha, timestamp ms: %lld\n", cpuid(), get_timestamp_ms());
-    while (1) {
-        auto node = _rb_first(&cpus[cpuid()].timer);
-        if (!node)
-            break;
-        auto timer = container_of(node, struct timer, _node);
-        if (get_timestamp_ms() < timer->_key)
-            break;
-        cancel_cpu_timer(timer);
-        timer->triggered = true;
-        timer->handler(timer);
-    }
-}
-
-void init_clock_handler()
-{
-    set_clock_handler(&timer_clock_handler);
-}
-
-static struct timer hello_timer[4];
-
-static void hello(struct timer *t)
-{
-    printk("CPU %lld: living\n", cpuid());
-    t->data++;
-    set_cpu_timer(&hello_timer[cpuid()]);
-}
-
-void set_cpu_timer(struct timer *timer)
-{
-    timer->triggered = false;
-    timer->_key = get_timestamp_ms() + timer->elapse;
-    ASSERT(0 == _rb_insert(&timer->_node, &cpus[cpuid()].timer, __timer_cmp));
-    __timer_set_clock();
-}
-
-void cancel_cpu_timer(struct timer *timer)
-{
-    ASSERT(!timer->triggered);
-    _rb_erase(&timer->_node, &cpus[cpuid()].timer);
-    __timer_set_clock();
-}
-
-void set_cpu_on()
-{
-    ASSERT(!_arch_disable_trap());
-    // disable the lower-half address to prevent stupid errors
-    extern PTEntries invalid_pt;
-    arch_set_ttbr0(K2P(&invalid_pt));
-    extern char exception_vector[];
-    arch_set_vbar(exception_vector);
-    arch_reset_esr();
-    init_clock();
-    cpus[cpuid()].online = true;
-    printk("CPU %lld: hello\n", cpuid());
-    hello_timer[cpuid()].elapse = 5000;
-    hello_timer[cpuid()].handler = hello;
-    set_cpu_timer(&hello_timer[cpuid()]);
-}
-
-void set_cpu_off()
-{
-    _arch_disable_trap();
-    cpus[cpuid()].online = false;
-    printk("CPU %lld: stopped\n", cpuid());
-}
-
+NO_RETURN void idle_entry();
+
+typedef struct{
+    u8 boot_flag;
+    u8 start_chsp[3];
+    u8 type;
+    u8 end_chs[3];
+    u32 start_lba;
+    u32 num_sectors;
+}__attribute__((packed)) PartitionEntry;
+
+typedef struct{
+    u8 bootstrap[0x1BE];
+    PartitionEntry partition[4];
+    u16 signature;
+}__attribute__((packed)) MBR;
 ================================================================================
 #core.c
 
@@ -1202,8 +50,13 @@ NO_RETURN void kernel_entry()
 {
     printk("Hello world! (Core %lld)\n", cpuid());
     // proc_test();
-    vm_test();
-    user_proc_test();
+    // vm_test();
+    // user_proc_test();
+    io_test();
+
+    /* LAB 4 TODO 3 BEGIN */
+    
+    /* LAB 4 TODO 3 END */
 
     while (1)
         yield();
@@ -1222,118 +75,456 @@ NO_INLINE NO_RETURN void _panic(const char *file, int line)
     arch_stop_cpu();
 }
 ================================================================================
-#user_proc_test.c
+#virtio.h
 
-#include <test/test.h>
-#include <common/rc.h>
-#include <kernel/pt.h>
+#pragma once
+
+#include <common/defines.h>
+#include <driver/base.h>
+#include <common/buf.h>
+
+#define NQUEUE 8
+
+#define VIRTIO_REG_MAGICVALUE (VIRTIO0 + 0x00)
+#define VIRTIO_REG_VERSION (VIRTIO0 + 0x04)
+#define VIRTIO_REG_DEVICE_ID (VIRTIO0 + 0x08)
+#define VIRTIO_REG_VENDOR_ID (VIRTIO0 + 0x0c)
+#define VIRTIO_REG_DEVICE_FEATURES (VIRTIO0 + 0x10)
+#define VIRTIO_REG_DEVICE_FEATURES_SEL (VIRTIO0 + 0x14)
+#define VIRTIO_REG_DRIVER_FEATURES (VIRTIO0 + 0x20)
+#define VIRTIO_REG_DRIVER_FEATURES_SEL (VIRTIO0 + 0x24)
+#define VIRTIO_REG_QUEUE_SEL (VIRTIO0 + 0x30)
+#define VIRTIO_REG_QUEUE_NUM_MAX (VIRTIO0 + 0x34)
+#define VIRTIO_REG_QUEUE_NUM (VIRTIO0 + 0x38)
+#define VIRTIO_REG_QUEUE_READY (VIRTIO0 + 0x44)
+#define VIRTIO_REG_QUEUE_NOTIFY (VIRTIO0 + 0x50)
+#define VIRTIO_REG_INTERRUPT_STATUS (VIRTIO0 + 0x60)
+#define VIRTIO_REG_INTERRUPT_ACK (VIRTIO0 + 0x64)
+#define VIRTIO_REG_STATUS (VIRTIO0 + 0x70)
+#define VIRTIO_REG_QUEUE_DESC_LOW (VIRTIO0 + 0x80)
+#define VIRTIO_REG_QUEUE_DESC_HIGH (VIRTIO0 + 0x84)
+#define VIRTIO_REG_QUEUE_DRIVER_LOW (VIRTIO0 + 0x90)
+#define VIRTIO_REG_QUEUE_DRIVER_HIGH (VIRTIO0 + 0x94)
+#define VIRTIO_REG_QUEUE_DEVICE_LOW (VIRTIO0 + 0xa0)
+#define VIRTIO_REG_QUEUE_DEVICE_HIGH (VIRTIO0 + 0xa4)
+#define VIRTIO_REG_CONFIG_GENERATION (VIRTIO0 + 0xfc)
+#define VIRTIO_REG_CONFIG (VIRTIO0 + 0x100)
+
+#define DEV_STATUS_ACKNOWLEDGE 1
+#define DEV_STATUS_DRIVER 2
+#define DEV_STATUS_FAILED 128
+#define DEV_STATUS_FEATURES_OK 8
+#define DEV_STATUS_DRIVER_OK 4
+#define DEV_STATUS_NEEDS_RESET 64
+
+#define VIRTIO_BLK_F_SIZE_MAX 1
+#define VIRTIO_BLK_F_SEG_MAX 2
+#define VIRTIO_BLK_F_GEOMETRY 4
+#define VIRTIO_BLK_F_RO 5
+#define VIRTIO_BLK_F_BLK_SIZE 6
+#define VIRTIO_BLK_F_FLUSH 9
+#define VIRTIO_BLK_F_TOPOLOGY 10
+#define VIRTIO_BLK_F_CONFIG_WCE 11
+#define VIRTIO_BLK_F_DISCARD 13
+#define VIRTIO_BLK_F_WRITE_ZEROES 14
+#define VIRTIO_F_ANY_LAYOUT 27
+#define VIRTIO_RING_F_INDIRECT_DESC 28
+#define VIRTIO_RING_F_EVENT_IDX 29
+
+#define VIRTIO_BLK_S_OK 0
+#define VIRTIO_BLK_S_IOERR 1
+#define VIRTIO_BLK_S_UNSUPP 2
+
+#define VIRTQ_DESC_F_NEXT 1
+#define VIRTQ_DESC_F_WRITE 2
+#define VIRTQ_DESC_F_INDIRECT 4
+struct virtq_desc {
+    u64 addr;
+    u32 len;
+    u16 flags;
+    u16 next;
+} __attribute__((packed, aligned(16)));
+
+#define VIRTQ_AVAIL_F_NO_INTERRUPT 1
+struct virtq_avail {
+    u16 flags;
+    u16 idx;
+    u16 ring[NQUEUE];
+} __attribute__((packed, aligned(2)));
+
+struct virtq_used_elem {
+    u32 id;
+    u32 len;
+} __attribute__((packed));
+
+#define VIRTQ_USED_F_NO_NOTIFY 1
+struct virtq_used {
+    u16 flags;
+    u16 idx;
+    struct virtq_used_elem ring[NQUEUE];
+} __attribute__((packed, aligned(4)));
+
+struct virtq {
+    struct virtq_desc *desc;
+    struct virtq_avail *avail;
+    struct virtq_used *used;
+    u16 free_head;
+    u16 nfree;
+    u16 last_used_idx;
+
+    struct {
+        volatile u8 status;
+        volatile u8 done;
+        u8 *buf;
+    } info[NQUEUE];
+};
+
+#define VIRTIO_BLK_T_IN 0
+#define VIRTIO_BLK_T_OUT 1
+#define VIRTIO_BLK_T_FLUSH 4
+#define VIRTIO_BLK_T_DISCARD 11
+#define VIRTIO_BLK_T_WRITE_ZEROES 13
+struct virtio_blk_req_hdr {
+    u32 type;
+    u32 reserved;
+    u64 sector;
+} __attribute__((packed));
+
+enum diskop {
+    DREAD,
+    DWRITE,
+};
+
+int virtio_blk_rw(Buf *b);
+void virtio_init(void);
+
+================================================================================
+#virtio_blk.c
+
+#include <common/spinlock.h>
+#include <driver/virtio.h>
+#include <driver/interrupt.h>
+#include <common/buf.h>
+#include <common/sem.h>
+#include <common/string.h>
 #include <kernel/mem.h>
 #include <kernel/printk.h>
-#include <common/sem.h>
-#include <kernel/proc.h>
-#include <kernel/syscall.h>
-#include <driver/memlayout.h>
-#include <kernel/sched.h>
 
-PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc);
+#define VIRTIO_MAGIC 0x74726976
 
-void vm_test()
+struct disk {
+    SpinLock lk;
+    struct virtq virtq;
+} disk;
+
+static void desc_init(struct virtq *virtq)
 {
-    printk("vm_test\n");
-    static void *p[100000];
-    extern RefCount kalloc_page_cnt;
-    struct pgdir pg;
-    int p0 = kalloc_page_cnt.count;
-    init_pgdir(&pg);
-    for (u64 i = 0; i < 100000; i++) {
-        p[i] = kalloc_page();
-        *get_pte(&pg, i << 12, true) = K2P(p[i]) | PTE_USER_DATA;
-        *(int *)p[i] = i;
+    for (int i = 0; i < NQUEUE; i++) {
+        if (i != NQUEUE - 1) {
+            virtq->desc[i].flags = VIRTQ_DESC_F_NEXT;
+            virtq->desc[i].next = i + 1;
+        }
     }
-    attach_pgdir(&pg);
-    for (u64 i = 0; i < 100000; i++) {
-        ASSERT(*(int *)(P2K(PTE_ADDRESS(*get_pte(&pg, i << 12, false)))) ==
-               (int)i);
-        ASSERT(*(int *)(i << 12) == (int)i);
-    }
-    free_pgdir(&pg);
-    attach_pgdir(&pg);
-    for (u64 i = 0; i < 100000; i++)
-        kfree_page(p[i]);
-    ASSERT(kalloc_page_cnt.count == p0);
-    printk("vm_test PASS\n");
 }
 
-void trap_return(u64);
-
-static u64 proc_cnt[22] = { 0 }, cpu_cnt[4] = { 0 };
-static Semaphore myrepot_done;
-
-u64 syscall_myreport(u64 id)
+static int alloc_desc(struct virtq *virtq)
 {
-// #ifdef lab3_debug1
-//     printk("user_proc_test.c:48\n");
-// #endif
-    static bool stop;
-    ASSERT(id < 22);
-    if (stop)
-        return 0;
-    proc_cnt[id]++;
-    cpu_cnt[cpuid()]++;
-    if (proc_cnt[id] > 12345) {
-        stop = true;
-        post_sem(&myrepot_done);
+    if (virtq->nfree == 0) {
+        PANIC();
     }
+
+    u16 d = virtq->free_head;
+    if (virtq->desc[d].flags & VIRTQ_DESC_F_NEXT)
+        virtq->free_head = virtq->desc[d].next;
+
+    virtq->nfree--;
+
+    return d;
+}
+
+static void free_desc(struct virtq *virtq, u16 n)
+{
+    u16 head = n;
+    int empty = 0;
+
+    if (virtq->nfree == 0)
+        empty = 1;
+
+    while (virtq->nfree++, (virtq->desc[n].flags & VIRTQ_DESC_F_NEXT)) {
+        n = virtq->desc[n].next;
+    }
+
+    virtq->desc[n].flags = VIRTQ_DESC_F_NEXT;
+    if (!empty)
+        virtq->desc[n].next = virtq->free_head;
+    virtq->free_head = head;
+}
+
+int virtio_blk_rw(Buf *b)
+{
+    enum diskop op = DREAD;
+    // 脏数据，需要写入
+    if (b->flags & B_DIRTY)
+        op = DWRITE;
+    // 初始化b的信号量
+    init_sem(&b->sem, 0);
+    // 获得要读写的块
+    u64 sector = b->block_no;
+    // hdr是操作的元数据
+    struct virtio_blk_req_hdr hdr;
+
+    if (op == DREAD)
+        hdr.type = VIRTIO_BLK_T_IN;
+    else if (op == DWRITE)
+        hdr.type = VIRTIO_BLK_T_OUT;
+    else
+        return -1;
+    hdr.reserved = 0;
+    hdr.sector = sector;
+
+    acquire_spinlock(&disk.lk);
+    // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
+    int d0 = alloc_desc(&disk.virtq);
+    if (d0 < 0)
+        return -1;
+    disk.virtq.desc[d0].addr = (u64)V2P(&hdr);
+    disk.virtq.desc[d0].len = sizeof(hdr);
+    disk.virtq.desc[d0].flags = VIRTQ_DESC_F_NEXT;
+
+    int d1 = alloc_desc(&disk.virtq);
+    if (d1 < 0)
+        return -1;
+    disk.virtq.desc[d0].next = d1;
+    // 读出缓冲区的物理地址
+    disk.virtq.desc[d1].addr = (u64)V2P(b->data);
+    disk.virtq.desc[d1].len = 512;
+    disk.virtq.desc[d1].flags = VIRTQ_DESC_F_NEXT;
+    if (op == DREAD)
+        disk.virtq.desc[d1].flags |= VIRTQ_DESC_F_WRITE;
+
+    int d2 = alloc_desc(&disk.virtq);
+    if (d2 < 0)
+        return -1;
+    disk.virtq.desc[d1].next = d2;
+    disk.virtq.desc[d2].addr = (u64)V2P(&disk.virtq.info[d0].status);
+    disk.virtq.desc[d2].len = sizeof(disk.virtq.info[d0].status);
+    disk.virtq.desc[d2].flags = VIRTQ_DESC_F_WRITE;
+    disk.virtq.desc[d2].next = 0;
+
+    disk.virtq.avail->ring[disk.virtq.avail->idx % NQUEUE] = d0;
+    disk.virtq.avail->idx++;
+
+    disk.virtq.info[d0].buf = b->data;
+
+    arch_fence();
+    REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
+    arch_fence();
+
+    /* LAB 4 TODO 1 BEGIN */
+    release_spinlock(&disk.lk);
+    wait_sem(&b->sem);
+    acquire_spinlock(&disk.lk);
+    /* LAB 4 TODO 1 END */
+
+    disk.virtq.info[d0].done = 0;
+    free_desc(&disk.virtq, d0);
+    release_spinlock(&disk.lk);
+    return 0;
+}
+// 中断，触发唤醒对应的进程
+static void virtio_blk_intr()
+{
+    acquire_spinlock(&disk.lk);
+
+    u32 intr_status = REG(VIRTIO_REG_INTERRUPT_STATUS);
+    REG(VIRTIO_REG_INTERRUPT_ACK) = intr_status & 0x3;
+
+    int d0;
+    while (disk.virtq.last_used_idx != disk.virtq.used->idx) {
+        d0 = disk.virtq.used->ring[disk.virtq.last_used_idx % NQUEUE].id;
+        if (disk.virtq.info[d0].status != 0) {
+            PANIC();
+        }
+
+        /* LAB 4 TODO 2 BEGIN */
+        post_sem(&disk.virtq.info[d0].buf->sem);
+        /* LAB 4 TODO 2 END */
+
+        disk.virtq.info[d0].buf = NULL;
+        disk.virtq.last_used_idx++;
+    }
+
+    release_spinlock(&disk.lk);
+}
+
+static int virtq_init(struct virtq *vq)
+{
+    memset(vq, 0, sizeof(*vq));
+
+    vq->desc = kalloc_page();
+    vq->avail = kalloc_page();
+    vq->used = kalloc_page();
+
+    memset(vq->desc, 0, 4096);
+    memset(vq->avail, 0, 4096);
+    memset(vq->used, 0, 4096);
+
+    if (!vq->desc || !vq->avail || !vq->used) {
+        PANIC();
+    }
+    vq->nfree = NQUEUE;
+    desc_init(vq);
+
     return 0;
 }
 
-void user_proc_test()
+void virtio_init()
 {
-    printk("user_proc_test\n");
-    init_sem(&myrepot_done, 0);
-    extern char loop_start[], loop_end[];
-    int pids[22];
-    for (int i = 0; i < 22; i++) {
-        auto p = create_proc();
-        for (u64 q = (u64)loop_start; q < (u64)loop_end; q += PAGE_SIZE) {
-            *get_pte(&p->pgdir, EXTMEM + q - (u64)loop_start, true) =
-                    K2P(q) | PTE_USER_DATA;
-        }
-        ASSERT(p->pgdir.pt);
-
-        // TODO: setup the user context
-        // 1. set x0 = i
-        // 2. set elr = EXTMEM
-        // 3. set spsr = 0
-        #define USER_STACK_VA (1UL << 39)
-
-        void *user_stack = kalloc_page();
-        *get_pte(&p->pgdir, USER_STACK_VA - PAGE_SIZE, true) = K2P(user_stack) | PTE_USER_DATA;
-
-        p->ucontext->x[0]=i;
-        p->ucontext->elr=EXTMEM;
-        p->ucontext->spsr=0;
-        p->ucontext->sp = USER_STACK_VA-16;
-        
-        pids[i] = start_proc(p, trap_return, 0);
-        printk("pid[%d] = %d\n", i, pids[i]);
+    if (REG(VIRTIO_REG_MAGICVALUE) != VIRTIO_MAGIC ||
+        REG(VIRTIO_REG_VERSION) != 2 || REG(VIRTIO_REG_DEVICE_ID) != 2) {
+        printk("[Virtio]: Device not found.");
+        PANIC();
     }
-    // printk("user_proc_test.c:91\n");
-    ASSERT(wait_sem(&myrepot_done));
-    printk("done\n");
-    for (int i = 0; i < 22; i++)
-        ASSERT(kill(pids[i]) == 0);
-    for (int i = 0; i < 22; i++) {
-        int code;
-        int pid = wait(&code);
-        printk("pid %d killed\n", pid);
-        ASSERT(code == -1);
+
+    /* Reset the device. */
+    REG(VIRTIO_REG_STATUS) = 0;
+
+    u32 status = 0;
+
+    /* Set the ACKNOWLEDGE status bit: the guest OS has noticed the device. */
+    status |= DEV_STATUS_ACKNOWLEDGE;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    /* Set the DRIVER status bit: the guest OS knows how to drive the device. */
+    status |= DEV_STATUS_DRIVER;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    /* Read device feature bits, and write the subset of feature bits understood by the OS and driver to the device. */
+    REG(VIRTIO_REG_DEVICE_FEATURES_SEL) = 0;
+    REG(VIRTIO_REG_DRIVER_FEATURES_SEL) = 0;
+
+    u32 features = REG(VIRTIO_REG_DEVICE_FEATURES);
+    features &= ~(1 << VIRTIO_BLK_F_SEG_MAX);
+    features &= ~(1 << VIRTIO_BLK_F_GEOMETRY);
+    features &= ~(1 << VIRTIO_BLK_F_RO);
+    features &= ~(1 << VIRTIO_BLK_F_BLK_SIZE);
+    features &= ~(1 << VIRTIO_BLK_F_FLUSH);
+    features &= ~(1 << VIRTIO_BLK_F_TOPOLOGY);
+    features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
+    features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
+    features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
+    features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
+    REG(VIRTIO_REG_DRIVER_FEATURES) = features;
+
+    status |= DEV_STATUS_FEATURES_OK;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    arch_fence();
+    status = REG(VIRTIO_REG_STATUS);
+    arch_fence();
+    if (!(status & DEV_STATUS_FEATURES_OK)) {
+        PANIC();
     }
-    printk("user_proc_test PASS\nRuntime:\n");
-    for (int i = 0; i < 4; i++)
-        printk("CPU %d: %llu\n", i, cpu_cnt[i]);
-    for (int i = 0; i < 22; i++)
-        printk("Proc %d: %llu\n", i, proc_cnt[i]);
+
+    virtq_init(&disk.virtq);
+
+    int qmax = REG(VIRTIO_REG_QUEUE_NUM_MAX);
+    if (qmax < NQUEUE) {
+        printk("[Virtio]: Too many queues.");
+        PANIC();
+    }
+
+    REG(VIRTIO_REG_QUEUE_SEL) = 0;
+    REG(VIRTIO_REG_QUEUE_NUM) = NQUEUE;
+
+    u64 phy_desc = V2P(disk.virtq.desc);
+    REG(VIRTIO_REG_QUEUE_DESC_LOW) = LO(phy_desc);
+    REG(VIRTIO_REG_QUEUE_DESC_HIGH) = HI(phy_desc);
+
+    u64 phy_avail = V2P(disk.virtq.avail);
+    REG(VIRTIO_REG_QUEUE_DRIVER_LOW) = LO(phy_avail);
+    REG(VIRTIO_REG_QUEUE_DRIVER_HIGH) = HI(phy_avail);
+    u64 phy_used = V2P(disk.virtq.used);
+
+    REG(VIRTIO_REG_QUEUE_DEVICE_LOW) = LO(phy_used);
+    REG(VIRTIO_REG_QUEUE_DEVICE_HIGH) = HI(phy_used);
+
+    arch_fence();
+
+    REG(VIRTIO_REG_QUEUE_READY) = 1;
+    status |= DEV_STATUS_DRIVER_OK;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    arch_fence();
+
+    set_interrupt_handler(VIRTIO_BLK_IRQ, virtio_blk_intr);
+    init_spinlock(&disk.lk);
 }
+
+================================================================================
+#sem.h
+
+#pragma once
+
+#include <common/list.h>
+
+struct Proc;
+
+typedef struct {
+    bool up;
+    struct Proc *proc;
+    ListNode slnode;
+} WaitData;
+
+typedef struct {
+    SpinLock lock;
+    int val;
+    ListNode sleeplist;
+} Semaphore;
+
+void init_sem(Semaphore *, int val);
+void _post_sem(Semaphore *);
+bool _wait_sem(Semaphore *);
+bool _get_sem(Semaphore *);
+int _query_sem(Semaphore *);
+void _lock_sem(Semaphore *);
+void _unlock_sem(Semaphore *);
+int get_all_sem(Semaphore *);
+int post_all_sem(Semaphore *);
+#define wait_sem(sem) (_lock_sem(sem), _wait_sem(sem))
+#define post_sem(sem) (_lock_sem(sem), _post_sem(sem), _unlock_sem(sem))
+#define get_sem(sem)                \
+    ({                              \
+        _lock_sem(sem);             \
+        bool __ret = _get_sem(sem); \
+        _unlock_sem(sem);           \
+        __ret;                      \
+    })
+
+#define SleepLock Semaphore
+#define init_sleeplock(lock) init_sem(lock, 1)
+#define acquire_sleeplock(lock) wait_sem(lock)
+#define release_sleeplock(checker) post_sem(lock)
+
+================================================================================
+#buf.h
+
+#pragma once
+
+#include <common/defines.h>
+#include <common/sem.h>
+
+#define BSIZE 512
+#define B_VALID 0x2 // Buffer has been read from disk.
+#define B_DIRTY 0x4 // Buffer needs to be written to disk.
+
+typedef struct {
+    int flags;
+    u8 data[BSIZE];
+    u32 block_no;
+
+    /* @todo: It depends on you to add other necessary elements. */
+    Semaphore sem;
+} Buf;
 
 ================================================================================

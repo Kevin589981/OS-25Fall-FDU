@@ -19,16 +19,22 @@ def merge_files(file_paths, output_path):
 if __name__ == "__main__":
     # 定义要合并的文件路径
     files_to_merge = [
-        "src/kernel/sched.c",
-        "src/kernel/proc.h",
-        "src/kernel/proc.c",
-        "src/kernel/cpu.h",
-        "src/kernel/cpu.c",
+        # "src/kernel/sched.c",
+        # "src/kernel/proc.h",
+        # "src/kernel/proc.c",
+        # "src/kernel/cpu.h",
+        # "src/kernel/cpu.c",
         # "src/kernel/pt.c",
+        "src/kernel/core.h",
         "src/kernel/core.c",
+        "src/driver/virtio.h",
+        "src/driver/virtio_blk.c",
+        "src/common/sem.h",
+        "src/common/buf.h"
+
         # "src/kernel/syscall.c",
         # "src/aarch64/trap.S",
-        "src/test/user_proc_test.c",
+        # "src/test/user_proc_test.c",
         # "src/user/loop.S"
     ]
     

@@ -13,7 +13,7 @@
 #include <driver/virtio.h>
 
 static volatile bool boot_secondary_cpus = false;
-
+extern void virtio_init(void);
 void main()
 {
     if (cpuid() == 0) {
