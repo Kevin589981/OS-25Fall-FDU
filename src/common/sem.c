@@ -59,7 +59,7 @@ int post_all_sem(Semaphore *sem)
     return ret;
 }
 
-bool _wait_sem(Semaphore *sem, bool alertable)
+bool _wait_sem(Semaphore *sem)
 {
     if (--sem->val >= 0) {
         release_spinlock(&sem->lock);
@@ -71,7 +71,7 @@ bool _wait_sem(Semaphore *sem, bool alertable)
     _insert_into_list(&sem->sleeplist, &wait->slnode);
     acquire_sched_lock();
     release_spinlock(&sem->lock);
-    sched(alertable ? SLEEPING : DEEPSLEEPING);
+    sched(SLEEPING);
     acquire_spinlock(&sem->lock); // also the lock for waitdata
     if (!wait->up) // wakeup by other sources
     {

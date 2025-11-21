@@ -37,15 +37,15 @@ static void proc_test_1b(u64 a)
         if (a & 1)
             post_sem(&s2);
         else
-            unalertable_wait_sem(&s2);
+            wait_sem(&s2);
         break;
     case 8:
-        unalertable_wait_sem(&s3);
+        wait_sem(&s3);
         post_sem(&s4);
         break;
     case 9:
         post_sem(&s5);
-        unalertable_wait_sem(&s6);
+        wait_sem(&s6);
         break;
     }
     exit(a);
@@ -62,7 +62,7 @@ static void proc_test_1a(u64 a)
     case 0: {
         int t = 0, x;
         for (int i = 0; i < 10; i++) {
-            ASSERT(wait(&x) != -1);
+            wait(&x);
             t |= 1 << (x - 10);
         }
         ASSERT(t == 1023);
@@ -72,7 +72,7 @@ static void proc_test_1a(u64 a)
         break;
     case 2: {
         for (int i = 0; i < 10; i++)
-            unalertable_wait_sem(&s1);
+            ASSERT(wait_sem(&s1));
         ASSERT(!get_sem(&s1));
     } break;
     case 3:
@@ -82,7 +82,7 @@ static void proc_test_1a(u64 a)
     case 7: {
         int x;
         for (int i = 0; i < 10; i++)
-            ASSERT(wait(&x) != -1);
+            wait(&x);
         ASSERT(wait(&x) == -1);
     } break;
     case 8: {
@@ -90,7 +90,7 @@ static void proc_test_1a(u64 a)
         for (int i = 0; i < 10; i++)
             post_sem(&s3);
         for (int i = 0; i < 10; i++)
-            ASSERT(wait(&x) != -1);
+            wait(&x);
         ASSERT(wait(&x) == -1);
         ASSERT(s3.val == 0);
         ASSERT(get_all_sem(&s4) == 10);
@@ -98,11 +98,11 @@ static void proc_test_1a(u64 a)
     case 9: {
         int x;
         for (int i = 0; i < 10; i++)
-           unalertable_wait_sem(&s5);
+            wait_sem(&s5);
         for (int i = 0; i < 10; i++)
             post_sem(&s6);
         for (int i = 0; i < 10; i++)
-            ASSERT(wait(&x) != -1);
+            wait(&x);
         ASSERT(wait(&x) == -1);
         ASSERT(s5.val == 0);
         ASSERT(s6.val == 0);

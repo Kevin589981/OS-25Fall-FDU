@@ -97,8 +97,7 @@ void set_cpu_on()
 
 void set_cpu_off()
 {
-    if (!_arch_disable_trap()) 
-        PANIC();
+    _arch_disable_trap();
     cpus[cpuid()].online = false;
     printk("CPU %lld: stopped\n", cpuid());
 }
