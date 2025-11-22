@@ -120,7 +120,7 @@ int virtio_blk_rw(Buf *b)
     /* LAB 4 TODO 1 BEGIN */
     release_spinlock(&disk.lk);
     // printk("virtio_bk.c:122\n");
-    wait_sem(&b->sem);
+    unalertable_wait_sem(&b->sem);
     // printk("virtio_bk.c:124\n");
     acquire_spinlock(&disk.lk);
     /* LAB 4 TODO 1 END */

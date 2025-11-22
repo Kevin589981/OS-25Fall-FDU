@@ -1,16 +1,18 @@
 #include <aarch64/intrinsic.h>
 #include <common/spinlock.h>
-
+#include <kernel/debug.h>
+#ifdef DEBUG_LOCK_CONFLICT
 #include <kernel/printk.h>
 #include <kernel/cpu.h>
 #include <kernel/proc.h>
-#include <kernel/debug.h>
+
 // 外部函数声明，假设这些函数在您的内核中已经实现
 extern u64 get_timestamp(); // 获取当前时间戳（例如，微秒）
 extern Proc *thisproc();   // 获取当前进程的指针
 extern bool success;
 // 锁超时阈值，例如10秒 (单位：微秒)
 #define LOCK_TIMEOUT_US (u64)(100000llu*1000llu * 1000llu * 1000llu)
+#endif
 
 void init_spinlock(SpinLock *lock)
 {
@@ -31,7 +33,10 @@ bool try_acquire_spinlock(SpinLock *lock)
         return false;
     }
 }
+
+#ifdef DEBUG_LOCK_CONFLICT
 extern SpinLock printk_lock;
+
 void acquire_spinlock_internal(SpinLock *lock, const char *file, int line) {
     // 记录开始尝试获取锁的时间戳，用于检测自身等待是否超时
     // u64 start_time = get_timestamp();
@@ -74,6 +79,17 @@ void acquire_spinlock_internal(SpinLock *lock, const char *file, int line) {
     // 添加一个内存屏障，确保后续的读写操作不会被重排到锁获取之前
     asm volatile("dmb ish" : : : "memory");
 }
+#else
+void acquire_spinlock(SpinLock *lock) {
+    // 循环尝试，直到成功获取锁
+    while (try_acquire_spinlock(lock) == false) {
+        // 使用 'yield' 或 'wfe' 指令提示CPU我们处于自旋等待状态，可以节省功耗
+        arch_yield();
+    }
+    asm volatile("dmb ish" : : : "memory");
+}
+#endif
+
 
 void release_spinlock(SpinLock *lock)
 {

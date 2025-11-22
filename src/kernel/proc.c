@@ -323,7 +323,9 @@ int wait(int *exitcode)
         }
 
         release_spinlock(&global_process_lock);
-        wait_sem(&parent->childexit);
+        if (!wait_sem(&parent->childexit)){
+            return -1;
+        }
     }
 }
 
@@ -423,7 +425,7 @@ int kill(int pid)
         return -1;
     }
     target->killed=true;
-    activate_proc(target);
+    alert_proc(target);
     release_spinlock(&global_process_lock);
     
     return 0;

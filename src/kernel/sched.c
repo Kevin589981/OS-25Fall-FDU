@@ -279,8 +279,11 @@ bool _activate_proc(Proc *p, bool onalert)
         release_sched_lock(); 
         return false;
     }
-    
-    else if (p->state == SLEEPING || p->state == UNUSED) {
+    if (p->state == DEEPSLEEPING && onalert) {
+        release_sched_lock();
+        return false;
+    }
+    else if (p->state==DEEPSLEEPING||p->state == SLEEPING || p->state == UNUSED) {
         int target_cpu = 0;
         u64 min_count = cpus[0].sched.task_count;
         
@@ -334,7 +337,9 @@ bool _activate_proc(Proc *p, bool onalert)
         
         p->state = RUNNABLE;
     
-        _rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less);
+        if (_rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less)!=0){
+            PANIC();
+        }
         cpus[target_cpu].sched.task_count++;
         // 修改：更新queue_weight
         cpus[target_cpu].sched.queue_weight += WEIGHT(p->schinfo.nice);
@@ -398,9 +403,11 @@ static void update_this_state(enum procstate new_state)
     
     if (new_state == RUNNABLE) {
         // RUNNING -> RUNNABLE: 插入红黑树
-        _rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less);
+        if (_rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less)!=0){
+            PANIC();
+        }
         cpus[my_cpu].sched.queue_weight += WEIGHT(this->schinfo.nice);
-    } else if (new_state == ZOMBIE||new_state==SLEEPING) {
+    } else if (new_state == ZOMBIE||new_state==SLEEPING||new_state==DEEPSLEEPING) {
         cpus[my_cpu].sched.task_count--;
     }
 }
