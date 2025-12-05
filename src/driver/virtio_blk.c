@@ -60,12 +60,14 @@ static void free_desc(struct virtq *virtq, u16 n)
 int virtio_blk_rw(Buf *b)
 {
     enum diskop op = DREAD;
+    // 脏数据，需要写入
     if (b->flags & B_DIRTY)
         op = DWRITE;
-    
+    // 初始化b的信号量
     init_sem(&b->sem, 0);
-
+    // 获得要读写的块
     u64 sector = b->block_no;
+    // hdr是操作的元数据
     struct virtio_blk_req_hdr hdr;
 
     if (op == DREAD)
@@ -78,7 +80,7 @@ int virtio_blk_rw(Buf *b)
     hdr.sector = sector;
 
     acquire_spinlock(&disk.lk);
-
+    // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
     int d0 = alloc_desc(&disk.virtq);
     if (d0 < 0)
         return -1;
@@ -90,6 +92,7 @@ int virtio_blk_rw(Buf *b)
     if (d1 < 0)
         return -1;
     disk.virtq.desc[d0].next = d1;
+    // 读出缓冲区的物理地址
     disk.virtq.desc[d1].addr = (u64)V2P(b->data);
     disk.virtq.desc[d1].len = 512;
     disk.virtq.desc[d1].flags = VIRTQ_DESC_F_NEXT;
@@ -115,7 +118,11 @@ int virtio_blk_rw(Buf *b)
     arch_fence();
 
     /* LAB 4 TODO 1 BEGIN */
-    
+    release_spinlock(&disk.lk);
+    // printk("virtio_bk.c:122\n");
+    unalertable_wait_sem(&b->sem);
+    // printk("virtio_bk.c:124\n");
+    acquire_spinlock(&disk.lk);
     /* LAB 4 TODO 1 END */
 
     disk.virtq.info[d0].done = 0;
@@ -123,7 +130,7 @@ int virtio_blk_rw(Buf *b)
     release_spinlock(&disk.lk);
     return 0;
 }
-
+// 中断，触发唤醒对应的进程
 static void virtio_blk_intr()
 {
     acquire_spinlock(&disk.lk);
@@ -139,7 +146,13 @@ static void virtio_blk_intr()
         }
 
         /* LAB 4 TODO 2 BEGIN */
-    
+        u8 *data_ptr = disk.virtq.info[d0].buf;
+        if (data_ptr) {
+            Buf *b = container_of(data_ptr, Buf, data[0]);
+            post_sem(&b->sem);
+        }
+
+        
         /* LAB 4 TODO 2 END */
 
         disk.virtq.info[d0].buf = NULL;

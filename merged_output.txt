@@ -1,0 +1,567 @@
+#core.h
+
+#pragma once
+#include <common/defines.h>
+
+NO_RETURN void idle_entry();
+
+typedef struct{
+    u8 boot_flag;
+    u8 start_chsp[3];
+    u8 type;
+    u8 end_chs[3];
+    u32 start_lba;
+    u32 num_sectors;
+}__attribute__((packed)) PartitionEntry;
+
+typedef struct{
+    u8 bootstrap[0x1BE];
+    PartitionEntry partition[4];
+    u16 signature;
+}__attribute__((packed)) MBR;
+================================================================================
+#core.c
+
+#include <aarch64/intrinsic.h>
+#include <kernel/cpu.h>
+#include <kernel/printk.h>
+#include <kernel/sched.h>
+#include <test/test.h>
+#include <common/buf.h>
+#include <kernel/core.h>
+#include <driver/virtio.h>
+volatile bool panic_flag;
+extern int virtio_blk_rw(Buf *b);
+NO_RETURN void idle_entry()
+{
+    set_cpu_on();
+    while (1) {
+        yield();
+        if (panic_flag)
+            break;
+        arch_with_trap
+        {
+            arch_wfi();
+        }
+    }
+    set_cpu_off();
+    arch_stop_cpu();
+}
+
+NO_RETURN void kernel_entry()
+{
+    printk("Hello world! (Core %lld)\n", cpuid());
+    // proc_test();
+    // vm_test();
+    // user_proc_test();
+    io_test();
+
+    /* LAB 4 TODO 3 BEGIN */
+    Buf mbr_buf;
+    mbr_buf.block_no = 0;  // MBR在LBA 0
+    mbr_buf.flags = 0;      // 读操作
+
+    printk("Reading MBR...\n");
+
+    // 调用同步读写函数读取MBR
+    if (virtio_blk_rw(&mbr_buf) != 0) {
+        printk("Failed to read MBR!");
+        PANIC();
+    }
+
+    // 数据已经在 mbr_buf.data 中了
+    MBR *mbr = (MBR *)mbr_buf.data;
+
+    // 检查签名
+    if (mbr->signature != 0xAA55) {
+        printk("Invalid MBR signature!");
+        PANIC();
+    }
+
+    // 获取第二分区信息
+    PartitionEntry *part2 = &mbr->partition[1];
+    u32 part2_start_lba = part2->start_lba;
+    u32 part2_num_sectors = part2->num_sectors;
+
+    printk("Partition 2: Start LBA = %u, Size = %u sectors\n", 
+       part2_start_lba, part2_num_sectors);
+    /* LAB 4 TODO 3 END */
+
+    while (1)
+        yield();
+}
+
+NO_INLINE NO_RETURN void _panic(const char *file, int line)
+{
+    printk("=====%s:%d PANIC%lld!=====\n", file, line, cpuid());
+    panic_flag = true;
+    set_cpu_off();
+    for (int i = 0; i < NCPU; i++) {
+        if (cpus[i].online)
+            i--;
+    }
+    printk("Kernel PANIC invoked at %s:%d. Stopped.\n", file, line);
+    arch_stop_cpu();
+}
+================================================================================
+#virtio.h
+
+#pragma once
+
+#include <common/defines.h>
+#include <driver/base.h>
+#include <common/buf.h>
+
+#define NQUEUE 8
+
+#define VIRTIO_REG_MAGICVALUE (VIRTIO0 + 0x00)
+#define VIRTIO_REG_VERSION (VIRTIO0 + 0x04)
+#define VIRTIO_REG_DEVICE_ID (VIRTIO0 + 0x08)
+#define VIRTIO_REG_VENDOR_ID (VIRTIO0 + 0x0c)
+#define VIRTIO_REG_DEVICE_FEATURES (VIRTIO0 + 0x10)
+#define VIRTIO_REG_DEVICE_FEATURES_SEL (VIRTIO0 + 0x14)
+#define VIRTIO_REG_DRIVER_FEATURES (VIRTIO0 + 0x20)
+#define VIRTIO_REG_DRIVER_FEATURES_SEL (VIRTIO0 + 0x24)
+#define VIRTIO_REG_QUEUE_SEL (VIRTIO0 + 0x30)
+#define VIRTIO_REG_QUEUE_NUM_MAX (VIRTIO0 + 0x34)
+#define VIRTIO_REG_QUEUE_NUM (VIRTIO0 + 0x38)
+#define VIRTIO_REG_QUEUE_READY (VIRTIO0 + 0x44)
+#define VIRTIO_REG_QUEUE_NOTIFY (VIRTIO0 + 0x50)
+#define VIRTIO_REG_INTERRUPT_STATUS (VIRTIO0 + 0x60)
+#define VIRTIO_REG_INTERRUPT_ACK (VIRTIO0 + 0x64)
+#define VIRTIO_REG_STATUS (VIRTIO0 + 0x70)
+#define VIRTIO_REG_QUEUE_DESC_LOW (VIRTIO0 + 0x80)
+#define VIRTIO_REG_QUEUE_DESC_HIGH (VIRTIO0 + 0x84)
+#define VIRTIO_REG_QUEUE_DRIVER_LOW (VIRTIO0 + 0x90)
+#define VIRTIO_REG_QUEUE_DRIVER_HIGH (VIRTIO0 + 0x94)
+#define VIRTIO_REG_QUEUE_DEVICE_LOW (VIRTIO0 + 0xa0)
+#define VIRTIO_REG_QUEUE_DEVICE_HIGH (VIRTIO0 + 0xa4)
+#define VIRTIO_REG_CONFIG_GENERATION (VIRTIO0 + 0xfc)
+#define VIRTIO_REG_CONFIG (VIRTIO0 + 0x100)
+
+#define DEV_STATUS_ACKNOWLEDGE 1
+#define DEV_STATUS_DRIVER 2
+#define DEV_STATUS_FAILED 128
+#define DEV_STATUS_FEATURES_OK 8
+#define DEV_STATUS_DRIVER_OK 4
+#define DEV_STATUS_NEEDS_RESET 64
+
+#define VIRTIO_BLK_F_SIZE_MAX 1
+#define VIRTIO_BLK_F_SEG_MAX 2
+#define VIRTIO_BLK_F_GEOMETRY 4
+#define VIRTIO_BLK_F_RO 5
+#define VIRTIO_BLK_F_BLK_SIZE 6
+#define VIRTIO_BLK_F_FLUSH 9
+#define VIRTIO_BLK_F_TOPOLOGY 10
+#define VIRTIO_BLK_F_CONFIG_WCE 11
+#define VIRTIO_BLK_F_DISCARD 13
+#define VIRTIO_BLK_F_WRITE_ZEROES 14
+#define VIRTIO_F_ANY_LAYOUT 27
+#define VIRTIO_RING_F_INDIRECT_DESC 28
+#define VIRTIO_RING_F_EVENT_IDX 29
+
+#define VIRTIO_BLK_S_OK 0
+#define VIRTIO_BLK_S_IOERR 1
+#define VIRTIO_BLK_S_UNSUPP 2
+
+#define VIRTQ_DESC_F_NEXT 1
+#define VIRTQ_DESC_F_WRITE 2
+#define VIRTQ_DESC_F_INDIRECT 4
+struct virtq_desc {
+    u64 addr;
+    u32 len;
+    u16 flags;
+    u16 next;
+} __attribute__((packed, aligned(16)));
+
+#define VIRTQ_AVAIL_F_NO_INTERRUPT 1
+struct virtq_avail {
+    u16 flags;
+    u16 idx;
+    u16 ring[NQUEUE];
+} __attribute__((packed, aligned(2)));
+
+struct virtq_used_elem {
+    u32 id;
+    u32 len;
+} __attribute__((packed));
+
+#define VIRTQ_USED_F_NO_NOTIFY 1
+struct virtq_used {
+    u16 flags;
+    u16 idx;
+    struct virtq_used_elem ring[NQUEUE];
+} __attribute__((packed, aligned(4)));
+
+struct virtq {
+    struct virtq_desc *desc;
+    struct virtq_avail *avail;
+    struct virtq_used *used;
+    u16 free_head;
+    u16 nfree;
+    u16 last_used_idx;
+
+    struct {
+        volatile u8 status;
+        volatile u8 done;
+        u8 *buf;
+    } info[NQUEUE];
+};
+
+#define VIRTIO_BLK_T_IN 0
+#define VIRTIO_BLK_T_OUT 1
+#define VIRTIO_BLK_T_FLUSH 4
+#define VIRTIO_BLK_T_DISCARD 11
+#define VIRTIO_BLK_T_WRITE_ZEROES 13
+struct virtio_blk_req_hdr {
+    u32 type;
+    u32 reserved;
+    u64 sector;
+} __attribute__((packed));
+
+enum diskop {
+    DREAD,
+    DWRITE,
+};
+
+int virtio_blk_rw(Buf *b);
+void virtio_init(void);
+
+================================================================================
+#virtio_blk.c
+
+#include <common/spinlock.h>
+#include <driver/virtio.h>
+#include <driver/interrupt.h>
+#include <common/buf.h>
+#include <common/sem.h>
+#include <common/string.h>
+#include <kernel/mem.h>
+#include <kernel/printk.h>
+
+#define VIRTIO_MAGIC 0x74726976
+
+struct disk {
+    SpinLock lk;
+    struct virtq virtq;
+} disk;
+
+static void desc_init(struct virtq *virtq)
+{
+    for (int i = 0; i < NQUEUE; i++) {
+        if (i != NQUEUE - 1) {
+            virtq->desc[i].flags = VIRTQ_DESC_F_NEXT;
+            virtq->desc[i].next = i + 1;
+        }
+    }
+}
+
+static int alloc_desc(struct virtq *virtq)
+{
+    if (virtq->nfree == 0) {
+        PANIC();
+    }
+
+    u16 d = virtq->free_head;
+    if (virtq->desc[d].flags & VIRTQ_DESC_F_NEXT)
+        virtq->free_head = virtq->desc[d].next;
+
+    virtq->nfree--;
+
+    return d;
+}
+
+static void free_desc(struct virtq *virtq, u16 n)
+{
+    u16 head = n;
+    int empty = 0;
+
+    if (virtq->nfree == 0)
+        empty = 1;
+
+    while (virtq->nfree++, (virtq->desc[n].flags & VIRTQ_DESC_F_NEXT)) {
+        n = virtq->desc[n].next;
+    }
+
+    virtq->desc[n].flags = VIRTQ_DESC_F_NEXT;
+    if (!empty)
+        virtq->desc[n].next = virtq->free_head;
+    virtq->free_head = head;
+}
+
+int virtio_blk_rw(Buf *b)
+{
+    enum diskop op = DREAD;
+    // 脏数据，需要写入
+    if (b->flags & B_DIRTY)
+        op = DWRITE;
+    // 初始化b的信号量
+    init_sem(&b->sem, 0);
+    // 获得要读写的块
+    u64 sector = b->block_no;
+    // hdr是操作的元数据
+    struct virtio_blk_req_hdr hdr;
+
+    if (op == DREAD)
+        hdr.type = VIRTIO_BLK_T_IN;
+    else if (op == DWRITE)
+        hdr.type = VIRTIO_BLK_T_OUT;
+    else
+        return -1;
+    hdr.reserved = 0;
+    hdr.sector = sector;
+
+    acquire_spinlock(&disk.lk);
+    // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
+    int d0 = alloc_desc(&disk.virtq);
+    if (d0 < 0)
+        return -1;
+    disk.virtq.desc[d0].addr = (u64)V2P(&hdr);
+    disk.virtq.desc[d0].len = sizeof(hdr);
+    disk.virtq.desc[d0].flags = VIRTQ_DESC_F_NEXT;
+
+    int d1 = alloc_desc(&disk.virtq);
+    if (d1 < 0)
+        return -1;
+    disk.virtq.desc[d0].next = d1;
+    // 读出缓冲区的物理地址
+    disk.virtq.desc[d1].addr = (u64)V2P(b->data);
+    disk.virtq.desc[d1].len = 512;
+    disk.virtq.desc[d1].flags = VIRTQ_DESC_F_NEXT;
+    if (op == DREAD)
+        disk.virtq.desc[d1].flags |= VIRTQ_DESC_F_WRITE;
+
+    int d2 = alloc_desc(&disk.virtq);
+    if (d2 < 0)
+        return -1;
+    disk.virtq.desc[d1].next = d2;
+    disk.virtq.desc[d2].addr = (u64)V2P(&disk.virtq.info[d0].status);
+    disk.virtq.desc[d2].len = sizeof(disk.virtq.info[d0].status);
+    disk.virtq.desc[d2].flags = VIRTQ_DESC_F_WRITE;
+    disk.virtq.desc[d2].next = 0;
+
+    disk.virtq.avail->ring[disk.virtq.avail->idx % NQUEUE] = d0;
+    disk.virtq.avail->idx++;
+
+    disk.virtq.info[d0].buf = b->data;
+
+    arch_fence();
+    REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
+    arch_fence();
+
+    /* LAB 4 TODO 1 BEGIN */
+    release_spinlock(&disk.lk);
+    // printk("virtio_bk.c:122\n");
+    wait_sem(&b->sem);
+    // printk("virtio_bk.c:124\n");
+    acquire_spinlock(&disk.lk);
+    /* LAB 4 TODO 1 END */
+
+    disk.virtq.info[d0].done = 0;
+    free_desc(&disk.virtq, d0);
+    release_spinlock(&disk.lk);
+    return 0;
+}
+// 中断，触发唤醒对应的进程
+static void virtio_blk_intr()
+{
+    acquire_spinlock(&disk.lk);
+
+    u32 intr_status = REG(VIRTIO_REG_INTERRUPT_STATUS);
+    REG(VIRTIO_REG_INTERRUPT_ACK) = intr_status & 0x3;
+
+    int d0;
+    while (disk.virtq.last_used_idx != disk.virtq.used->idx) {
+        d0 = disk.virtq.used->ring[disk.virtq.last_used_idx % NQUEUE].id;
+        if (disk.virtq.info[d0].status != 0) {
+            PANIC();
+        }
+
+        /* LAB 4 TODO 2 BEGIN */
+        u8 *data_ptr = disk.virtq.info[d0].buf;
+        if (data_ptr) {
+            Buf *b = container_of(data_ptr, Buf, data[0]);
+            post_sem(&b->sem);
+        }
+
+        
+        /* LAB 4 TODO 2 END */
+
+        disk.virtq.info[d0].buf = NULL;
+        disk.virtq.last_used_idx++;
+    }
+
+    release_spinlock(&disk.lk);
+}
+
+static int virtq_init(struct virtq *vq)
+{
+    memset(vq, 0, sizeof(*vq));
+
+    vq->desc = kalloc_page();
+    vq->avail = kalloc_page();
+    vq->used = kalloc_page();
+
+    memset(vq->desc, 0, 4096);
+    memset(vq->avail, 0, 4096);
+    memset(vq->used, 0, 4096);
+
+    if (!vq->desc || !vq->avail || !vq->used) {
+        PANIC();
+    }
+    vq->nfree = NQUEUE;
+    desc_init(vq);
+
+    return 0;
+}
+
+void virtio_init()
+{
+    if (REG(VIRTIO_REG_MAGICVALUE) != VIRTIO_MAGIC ||
+        REG(VIRTIO_REG_VERSION) != 2 || REG(VIRTIO_REG_DEVICE_ID) != 2) {
+        printk("[Virtio]: Device not found.");
+        PANIC();
+    }
+
+    /* Reset the device. */
+    REG(VIRTIO_REG_STATUS) = 0;
+
+    u32 status = 0;
+
+    /* Set the ACKNOWLEDGE status bit: the guest OS has noticed the device. */
+    status |= DEV_STATUS_ACKNOWLEDGE;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    /* Set the DRIVER status bit: the guest OS knows how to drive the device. */
+    status |= DEV_STATUS_DRIVER;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    /* Read device feature bits, and write the subset of feature bits understood by the OS and driver to the device. */
+    REG(VIRTIO_REG_DEVICE_FEATURES_SEL) = 0;
+    REG(VIRTIO_REG_DRIVER_FEATURES_SEL) = 0;
+
+    u32 features = REG(VIRTIO_REG_DEVICE_FEATURES);
+    features &= ~(1 << VIRTIO_BLK_F_SEG_MAX);
+    features &= ~(1 << VIRTIO_BLK_F_GEOMETRY);
+    features &= ~(1 << VIRTIO_BLK_F_RO);
+    features &= ~(1 << VIRTIO_BLK_F_BLK_SIZE);
+    features &= ~(1 << VIRTIO_BLK_F_FLUSH);
+    features &= ~(1 << VIRTIO_BLK_F_TOPOLOGY);
+    features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
+    features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
+    features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
+    features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
+    REG(VIRTIO_REG_DRIVER_FEATURES) = features;
+
+    status |= DEV_STATUS_FEATURES_OK;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    arch_fence();
+    status = REG(VIRTIO_REG_STATUS);
+    arch_fence();
+    if (!(status & DEV_STATUS_FEATURES_OK)) {
+        PANIC();
+    }
+
+    virtq_init(&disk.virtq);
+
+    int qmax = REG(VIRTIO_REG_QUEUE_NUM_MAX);
+    if (qmax < NQUEUE) {
+        printk("[Virtio]: Too many queues.");
+        PANIC();
+    }
+
+    REG(VIRTIO_REG_QUEUE_SEL) = 0;
+    REG(VIRTIO_REG_QUEUE_NUM) = NQUEUE;
+
+    u64 phy_desc = V2P(disk.virtq.desc);
+    REG(VIRTIO_REG_QUEUE_DESC_LOW) = LO(phy_desc);
+    REG(VIRTIO_REG_QUEUE_DESC_HIGH) = HI(phy_desc);
+
+    u64 phy_avail = V2P(disk.virtq.avail);
+    REG(VIRTIO_REG_QUEUE_DRIVER_LOW) = LO(phy_avail);
+    REG(VIRTIO_REG_QUEUE_DRIVER_HIGH) = HI(phy_avail);
+    u64 phy_used = V2P(disk.virtq.used);
+
+    REG(VIRTIO_REG_QUEUE_DEVICE_LOW) = LO(phy_used);
+    REG(VIRTIO_REG_QUEUE_DEVICE_HIGH) = HI(phy_used);
+
+    arch_fence();
+
+    REG(VIRTIO_REG_QUEUE_READY) = 1;
+    status |= DEV_STATUS_DRIVER_OK;
+    REG(VIRTIO_REG_STATUS) = status;
+
+    arch_fence();
+
+    set_interrupt_handler(VIRTIO_BLK_IRQ, virtio_blk_intr);
+    init_spinlock(&disk.lk);
+}
+
+================================================================================
+#sem.h
+
+#pragma once
+
+#include <common/list.h>
+
+struct Proc;
+
+typedef struct {
+    bool up;
+    struct Proc *proc;
+    ListNode slnode;
+} WaitData;
+
+typedef struct {
+    SpinLock lock;
+    int val;
+    ListNode sleeplist;
+} Semaphore;
+
+void init_sem(Semaphore *, int val);
+void _post_sem(Semaphore *);
+bool _wait_sem(Semaphore *);
+bool _get_sem(Semaphore *);
+int _query_sem(Semaphore *);
+void _lock_sem(Semaphore *);
+void _unlock_sem(Semaphore *);
+int get_all_sem(Semaphore *);
+int post_all_sem(Semaphore *);
+#define wait_sem(sem) (_lock_sem(sem), _wait_sem(sem))
+#define post_sem(sem) (_lock_sem(sem), _post_sem(sem), _unlock_sem(sem))
+#define get_sem(sem)                \
+    ({                              \
+        _lock_sem(sem);             \
+        bool __ret = _get_sem(sem); \
+        _unlock_sem(sem);           \
+        __ret;                      \
+    })
+
+#define SleepLock Semaphore
+#define init_sleeplock(lock) init_sem(lock, 1)
+#define acquire_sleeplock(lock) wait_sem(lock)
+#define release_sleeplock(checker) post_sem(lock)
+
+================================================================================
+#buf.h
+
+#pragma once
+
+#include <common/defines.h>
+#include <common/sem.h>
+
+#define BSIZE 512
+#define B_VALID 0x2 // Buffer has been read from disk.
+#define B_DIRTY 0x4 // Buffer needs to be written to disk.
+
+typedef struct {
+    int flags;
+    u8 data[BSIZE];
+    u32 block_no;
+
+    /* @todo: It depends on you to add other necessary elements. */
+    Semaphore sem;
+} Buf;
+
+================================================================================

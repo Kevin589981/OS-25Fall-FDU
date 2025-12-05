@@ -1,0 +1,9 @@
+[ 12%] Built target test
+[ 30%] Built target aarch64
+[ 51%] Built target common
+[ 69%] Built target kernelx
+[ 82%] Built target driver
+[ 89%] Built target kernel8.elf
+make[2]: *** [CMakeFiles/Makefile2:319: src/CMakeFiles/kernel.dir/all] Interrupt
+make[1]: *** [CMakeFiles/Makefile2:217: CMakeFiles/qemu.dir/rule] Interrupt
+make: *** [Makefile:125: qemu] Interrupt
