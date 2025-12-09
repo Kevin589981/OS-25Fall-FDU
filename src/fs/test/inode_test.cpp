@@ -30,14 +30,15 @@ void test_alloc()
     assert_eq(mock.count_inodes(), 2);
 
     auto *p = inodes.get(ino);
-
+    printf("p's rc count is %lld\n",p->rc.count);
     inodes.lock(p);
-    // printf("hello\n");
+    
     inodes.unlock(p);
-
+    printf("37\n");
     mock.begin_op(ctx);
+    
     inodes.put(ctx, p);
-
+    printf("hello\n");
     assert_eq(mock.count_inodes(), 2);
     mock.end_op(ctx);
     assert_eq(mock.count_inodes(), 1);
@@ -46,14 +47,15 @@ void test_alloc()
 void test_sync()
 {
     auto *p = inodes.get(1);
-
+    // printf("49 OK\n");
     inodes.lock(p);
+    // printf("51 OK\n");
     assert_eq(p->entry.type, INODE_DIRECTORY);
     p->entry.major = 0x19;
     p->entry.minor = 0x26;
     p->entry.indirect = 0xa817;
     inodes.unlock(p);
-
+    printf("56 OK\n");
     mock.begin_op(ctx);
     inodes.lock(p);
     inodes.sync(ctx, p, true);

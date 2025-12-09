@@ -71,6 +71,7 @@ void init_inodes(const SuperBlock* _sblock, const BlockCache* _cache) {
 
 // initialize in-memory inode.
 static void init_inode(Inode* inode) {
+    printk("Initing a new inode.\n");
     init_sleeplock(&inode->lock);
     init_rc(&inode->rc);
     init_list_node(&inode->node);
@@ -83,49 +84,237 @@ static usize inode_alloc(OpContext* ctx, InodeType type) {
     ASSERT(type != INODE_INVALID);
 
     // TODO
+    for (usize i=1;i<sblock->num_inodes;i++){
+        usize blockid=to_block_no(i);
+        Block *block=cache->acquire(blockid);
+        InodeEntry *entry=get_entry(block,i);
+        if (entry->type==INODE_INVALID){
+            memset(entry,0,sizeof(InodeEntry));
+            entry->type=type;
+            entry->num_links=0;
+            entry->num_bytes=0;
+            
+            cache->sync(ctx, block);
+            cache->release(block);
+            return i;
+        }
+        cache->release(block);
+        
+        
+    }
+    // 这里是否手动需要panic?
+    printk("disk is full.\n");
+    PANIC();
+    
     return 0;
 }
-
+static void inode_sync(OpContext* ctx, Inode* inode, bool do_write);
+static int useless=0;
 // see `inode.h`.
 static void inode_lock(Inode* inode) {
+    printk("Inode %lld's ref count is %lld\n",inode->inode_no,inode->rc.count);
     ASSERT(inode->rc.count > 0);
     // TODO
+    if (acquire_sleeplock(&inode->lock)){
+        useless=0;
+    }
+    if (!inode->valid) {
+        
+        inode_sync(NULL, inode, false);
+    }
+
 }
 
 // see `inode.h`.
 static void inode_unlock(Inode* inode) {
     ASSERT(inode->rc.count > 0);
     // TODO
+    release_sleeplock(&inode->lock);
 }
 
 // see `inode.h`.
 static void inode_sync(OpContext* ctx, Inode* inode, bool do_write) {
     // TODO
+    usize block_no=to_block_no(inode->inode_no);
+    Block *block=cache->acquire(block_no);
+    InodeEntry *entry=get_entry(block, inode->inode_no);
+
+
+    if (do_write){
+        if (!inode->valid)PANIC();
+        ASSERT(ctx!=NULL);
+        *entry=inode->entry;
+        cache->sync(ctx, block);
+    }else if (!inode->valid){
+        inode->entry=*entry;
+        inode->valid=true;
+    }
+    cache->release(block);
 }
 
 // see `inode.h`.
 static Inode* inode_get(usize inode_no) {
+    printk("Getting inode: %llu\n", inode_no);
     ASSERT(inode_no > 0);
     ASSERT(inode_no < sblock->num_inodes);
-    _acquire_spinlock(&lock);
+    // printk("152:\n");
+    acquire_spinlock(&lock);
+    // printk("154:\n");
     // TODO
-    return NULL;
+    Inode *empty=NULL;
+    _for_in_list(node,&head){
+        if (node==&head)continue;
+        Inode *temp=container_of(node,Inode,node);
+        if (temp->inode_no==inode_no){
+            temp->rc.count++;
+            release_spinlock(&lock);
+            // printk("163\n");
+            // inode_lock(temp);
+            // printk("165\n");
+            // if (!temp->valid){
+            //     inode_sync(NULL,temp,false);
+            // }
+            // printk("169\n");
+            return temp;
+
+        }
+
+    }
+    if (empty==NULL){
+        empty=(Inode *)kalloc(sizeof(Inode));
+        if (empty==NULL){
+            PANIC();
+        }
+    
+    }
+    //删去复用逻辑，不然put会有bug
+
+    init_inode(empty);
+    _insert_into_list(head.prev,&empty->node);
+    empty->inode_no=inode_no;
+    empty->rc.count=1;
+    empty->valid=false;
+    release_spinlock(&lock);
+
+    return empty;
 }
 // see `inode.h`.
 static void inode_clear(OpContext* ctx, Inode* inode) {
     // TODO
+    
+    InodeEntry *entry=&inode->entry;
+    printk("Clearing inode: %lld\n",inode->inode_no);
+    for (usize i=0;i<INODE_NUM_DIRECT;i++){
+        if (entry->addrs[i]!=0){
+            cache->free(ctx, entry->addrs[i]);
+            entry->addrs[i]=0;
+        }
+    }
+    usize indirect_block_no=entry->indirect;
+    if (indirect_block_no){
+        Block *block=cache->acquire(indirect_block_no);
+        u32 *indirect_addrs=get_addrs(block);
+        for (usize i=0;i<INODE_NUM_INDIRECT;i++){
+            if (indirect_addrs[i]){
+                cache->free(ctx,indirect_addrs[i]);
+            }
+        }
+        cache->release(block);
+        cache->free(ctx,indirect_block_no);
+        entry->indirect=0;
+    }
+    entry->num_bytes=0;
+    inode_sync(ctx,inode,true);
+
 }
 
 // see `inode.h`.
 static Inode* inode_share(Inode* inode) {
     // TODO
-    return 0;
+    acquire_spinlock(&lock);
+    ASSERT(inode->rc.count>0);
+    inode->rc.count++;
+    release_spinlock(&lock);
+    return inode;
 }
 
 // see `inode.h`.
 static void inode_put(OpContext* ctx, Inode* inode) {
     // TODO
+    acquire_spinlock(&lock);
+    ASSERT(inode->rc.count>0);
+
+    if (inode->rc.count > 1) {
+        inode->rc.count--;
+        release_spinlock(&lock);
+        return;
+    }
+
+    // ---------------------------------------------------------
+    // 情况 B: 最后一个引用 (rc == 1)
+    // ---------------------------------------------------------
+
+    // 1. 检查是否无效 (未加载)，或者链接数不为0 (无需物理删除)
+    //    在这两种情况下，我们只需要释放内存，不需要做磁盘操作。
+    if (inode->entry.num_links != 0) {
+        inode->rc.count--; // 1 -> 0
+        _detach_from_list(&inode->node);
+        release_spinlock(&lock);
+        kfree(inode);
+        return;
+    }
+
+    // 2. 需要物理删除 (valid == true && num_links == 0)
+    //    我们需要做 IO 操作，这需要睡眠锁，必须释放自旋锁。
+    
+    release_spinlock(&lock); // <--- 释放全局锁，允许并发
+    
+    inode_lock(inode);
+    inode_clear(ctx, inode); // 漫长的 IO 操作
+    inode_unlock(inode);
+
+    acquire_spinlock(&lock); // <--- 重新获取全局锁
+
+    // =========================================================
+    // 关键修正：双重检查 (Double Check)
+    // =========================================================
+    // 在我们 clear 的这段时间里，可能有人调用了 get()
+    if (inode->rc.count > 1) {
+        // 发现 rc 变成了 2 (或更多)！
+        // 意味着有人救活了这个 inode，我们不能释放内存。
+        // 文件内容已经被上面的 clear 清空了，但这符合逻辑（打开已删除的文件）。
+        inode->rc.count--; // 递减我自己的引用
+        release_spinlock(&lock);
+        return; // 直接返回，把 inode 留给那个新的持有者
+    }
+
+    // 3. 再次确认后，依然只有我一个引用 (rc == 1)
+    //    现在可以安全地释放内存了。
+    inode->rc.count--;
+    _detach_from_list(&inode->node);
+    release_spinlock(&lock);
+    kfree(inode);
 }
+//     if (inode->rc.count>1||inode->entry.num_links!=0){
+//         inode->rc.count--;
+//         release_spinlock(&lock);
+//         return;
+//     }
+//     inode_lock(inode);
+//     inode->rc.count--; 
+//     _detach_from_list(&inode->node);
+    
+//     release_spinlock(&lock);
+    
+    
+//     inode_clear(ctx,inode);
+//     inode->entry.type=INODE_INVALID;
+//     inode_sync(ctx,inode,true);
+//     inode_unlock(inode);
+
+//     kfree(inode);
+    
+// }
 
 /**
     @brief get which block is the offset of the inode in.
@@ -149,12 +338,72 @@ static void inode_put(OpContext* ctx, Inode* inode) {
 
     @note the caller must hold the lock of `inode`.
  */
+/**
+@brief 获取 inode 的偏移量所在的块。
+
+例如 `inode_map(ctx, my_inode, 1234, &modified)` 将返回 block_no
+包含文件第 1234 个字节的块
+由 `my_inode` 表示。
+
+如果该字节尚未分配块，`inode_map` 将
+分配一个新块并更新 `my_inode`，此时，`modified`
+将被设置为 true。
+
+然而，如果 `ctx == NULL`，`inode_map` 将不会尝试分配任何新块，
+当它发现该块未被分配时，将返回 0。
+    
+@param[out] modified 如果分配了新的块，则为 true，并且 `inode`
+已经被更改。
+
+@return usize 该区块的区块编号，如果 `ctx == NULL` 则返回 0 和
+所需块未被分配。
+
+@注意 调用者必须持有`inode`的锁。
+*/
 static usize inode_map(OpContext* ctx,
                        Inode* inode,
                        usize offset,
                        bool* modified) {
     // TODO
-    return 0;
+    usize data_block_no=offset/BLOCK_SIZE;
+    InodeEntry *entry=&inode->entry;
+    if (data_block_no<INODE_NUM_DIRECT){
+        if (!entry->addrs[data_block_no]){
+            if (ctx==NULL){
+                return 0;
+            }
+            entry->addrs[data_block_no]=cache->alloc(ctx);
+            *modified=true;
+        }
+        return entry->addrs[data_block_no];
+    }
+    usize data_block_no_indirect=data_block_no-INODE_NUM_DIRECT;
+    if (data_block_no_indirect>=INODE_NUM_INDIRECT){
+        PANIC();
+        return 0;
+    }
+    usize indirect_block_no=entry->indirect;
+    if (indirect_block_no==0){
+        if (ctx==NULL)return 0;
+        indirect_block_no=entry->indirect=cache->alloc(ctx);
+        *modified=true;
+    }
+    Block *indirect_block=cache->acquire(indirect_block_no);
+    u32 *indirect_addrs=get_addrs(indirect_block);
+    usize result_block=indirect_addrs[data_block_no_indirect];
+    if (!result_block){
+        if (ctx==NULL){
+            cache->release(indirect_block);
+            return 0;
+        }
+        result_block=cache->alloc(ctx);
+        indirect_addrs[data_block_no_indirect]=result_block;
+        cache->sync(ctx,indirect_block);
+
+    }
+    cache->release(indirect_block);
+    return result_block;
+    // return 0;
 }
 
 // see `inode.h`.
@@ -168,7 +417,30 @@ static usize inode_read(Inode* inode, u8* dest, usize offset, usize count) {
     ASSERT(offset <= end);
 
     // TODO
-    return 0;
+    usize total_read=0;
+    usize current_off=offset;
+    u8*current_dest=dest;
+    while (total_read<count){
+        usize off_in_block=current_off%BLOCK_SIZE;
+        usize bytes_left_in_block=BLOCK_SIZE-off_in_block;
+        usize bytes_to_copy=count-total_read;
+        if (bytes_to_copy>bytes_left_in_block){
+            bytes_to_copy=bytes_left_in_block;
+        }
+        bool modified=false;
+        usize block_no=inode_map(NULL,inode,current_off,&modified);
+        if (block_no==0){
+            memset(current_dest,0,bytes_to_copy);
+        }else{
+            Block *block=cache->acquire(block_no);
+            memcpy(current_dest,block->data+off_in_block,bytes_to_copy);
+            cache->release(block);
+        }
+        total_read+=bytes_to_copy;
+        current_off+=bytes_to_copy;
+        current_dest+=bytes_to_copy;
+    }
+    return total_read;
 }
 
 // see `inode.h`.
@@ -184,7 +456,35 @@ static usize inode_write(OpContext* ctx,
     ASSERT(offset <= end);
 
     // TODO
-    return 0;
+    usize total_write=0;
+    usize current_offset=offset;
+    usize current_source=(usize)src;
+    while (total_write<count){
+        usize off_in_block=current_offset%BLOCK_SIZE;
+        usize bytes_left_in_block=BLOCK_SIZE-off_in_block;
+        usize bytes_to_write=count-total_write;
+        if (bytes_to_write>bytes_left_in_block){
+            bytes_to_write=bytes_left_in_block;
+        }
+        bool modified=false;
+        usize block_no=inode_map(ctx,inode,current_offset,&modified);
+        if (block_no==0){
+            printk("Unable to write.\n");
+            PANIC();
+        }
+        Block *block=cache->acquire(block_no);
+        memcpy(block->data+off_in_block,(const void *)current_source,bytes_to_write);
+        cache->sync(ctx,block);
+        cache->release(block);
+        total_write+=bytes_to_write;
+        current_offset+=bytes_to_write;
+        current_source+=bytes_to_write;
+    }
+    if (current_offset>entry->num_bytes){
+        entry->num_bytes=current_offset;
+        inode_sync(ctx,inode,true);
+    }
+    return total_write;
 }
 
 // see `inode.h`.
@@ -193,7 +493,25 @@ static usize inode_lookup(Inode* inode, const char* name, usize* index) {
     ASSERT(entry->type == INODE_DIRECTORY);
 
     // TODO
-    return 0;
+    DirEntry dir;
+    
+    usize step=sizeof(DirEntry);
+    for (usize off=0;off<entry->num_bytes;off+=step){
+        usize n=inode_read(inode,(u8 *)&dir,off,step);
+        if (n!=step){
+            break;//这里是否需要PANIC()?
+        }
+        if (dir.inode_no==0){
+            continue;
+        }
+        if (strncmp(name,dir.name,FILE_NAME_MAX_LENGTH)==0){
+            if (index!=NULL){
+                *index=off/step;
+            }
+            return dir.inode_no;
+        }
+    }
+    return -1;
 }
 
 // see `inode.h`.
@@ -205,12 +523,65 @@ static usize inode_insert(OpContext* ctx,
     ASSERT(entry->type == INODE_DIRECTORY);
 
     // TODO
-    return 0;
+    // cache->begin_op(&ctx);
+    DirEntry dir;
+    usize step=sizeof(DirEntry);
+    bool found_slot=false;
+    if (inode_lookup(inode,name,NULL)){
+        return -1;
+    }
+    usize off;
+    for (off=0;off<entry->num_bytes;off+=step){
+        usize n=inode_read(inode,(u8 *)&dir,off,step);
+        if (n!=step){
+            break;//是否应该panic
+        }
+        if (dir.inode_no==0){
+            found_slot=true;
+            break;
+        }
+    }
+    if (!found_slot){
+        cache->begin_op(ctx);
+        entry->num_bytes+=step;
+        bool modified;
+        inode_map(ctx,inode,off,&modified);
+        cache->end_op(ctx);
+    }
+
+    memset(&dir,0,step);
+    
+    memcpy(dir.name,name,FILE_NAME_MAX_LENGTH);
+    dir.inode_no=inode_no;
+    
+    inode_write(ctx,inode,(u8 *)&dir,off,step);
+    
+    if (!found_slot){
+        inode_sync(ctx, inode, true);
+    }
+    
+    // cache->end_op(&ctx);
+    return off/step;
 }
 
 // see `inode.h`.
 static void inode_remove(OpContext* ctx, Inode* inode, usize index) {
     // TODO
+    InodeEntry *entry=&inode->entry;
+    if (index>=entry->num_bytes/sizeof(DirEntry))return;
+    
+    DirEntry dir;
+    memset(&dir,0,sizeof(DirEntry));
+    usize n=inode_write(ctx,inode,(u8 *)&dir,index*sizeof(DirEntry),sizeof(DirEntry));
+    if (n!=sizeof(DirEntry)){
+        PANIC();
+    }
+    if (index+1==entry->num_bytes/sizeof(DirEntry)){
+        entry->num_bytes-=sizeof(DirEntry);
+    }
+    
+    return;
+
 }
 
 InodeTree inodes = {
