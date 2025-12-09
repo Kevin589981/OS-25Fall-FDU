@@ -25,12 +25,14 @@ if __name__ == "__main__":
         # "src/kernel/cpu.h",
         # "src/kernel/cpu.c",
         # "src/kernel/pt.c",
-        "src/kernel/core.h",
-        "src/kernel/core.c",
-        "src/driver/virtio.h",
-        "src/driver/virtio_blk.c",
-        "src/common/sem.h",
-        "src/common/buf.h"
+        "src/fs/inode.h",
+        "src/fs/inode.c",
+        "src/fs/cache.h",
+        "src/fs/cache.c",
+        "src/fs/test/inode_test.cpp",
+        # "src/driver/virtio_blk.c",
+        # "src/common/sem.h",
+        # "src/common/buf.h"
 
         # "src/kernel/syscall.c",
         # "src/aarch64/trap.S",

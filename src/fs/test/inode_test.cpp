@@ -30,15 +30,15 @@ void test_alloc()
     assert_eq(mock.count_inodes(), 2);
 
     auto *p = inodes.get(ino);
-    printf("p's rc count is %lld\n",p->rc.count);
+    // printf("p's rc count is %lld\n",p->rc.count);
     inodes.lock(p);
     
     inodes.unlock(p);
-    printf("37\n");
+    // printf("37\n");
     mock.begin_op(ctx);
     
     inodes.put(ctx, p);
-    printf("hello\n");
+    // printf("hello\n");
     assert_eq(mock.count_inodes(), 2);
     mock.end_op(ctx);
     assert_eq(mock.count_inodes(), 1);
@@ -55,7 +55,7 @@ void test_sync()
     p->entry.minor = 0x26;
     p->entry.indirect = 0xa817;
     inodes.unlock(p);
-    printf("56 OK\n");
+    // printf("56 OK\n");
     mock.begin_op(ctx);
     inodes.lock(p);
     inodes.sync(ctx, p, true);
@@ -73,15 +73,19 @@ void test_sync()
 void test_touch()
 {
     auto *p = inodes.get(1);
+    // printf("76\n");
     inodes.lock(p);
 
     for (usize i = 2; i < mock.num_inodes; i++) {
+        // printf("i= %llu\n",i);
         mock.begin_op(ctx);
         usize ino = inodes.alloc(ctx, INODE_REGULAR);
+        // printf("83\n");
         inodes.insert(ctx, p, std::to_string(i).data(), ino);
-
+        // printf("84\n");
         auto *q = inodes.get(ino);
         inodes.lock(q);
+        // printf("87\n");
         assert_eq(q->entry.type, INODE_REGULAR);
         assert_eq(q->entry.major, 0);
         assert_eq(q->entry.minor, 0);
@@ -95,10 +99,10 @@ void test_touch()
         q->entry.num_links++;
 
         inodes.sync(ctx, q, true);
-
+        // printf("100\n");
         inodes.unlock(q);
         inodes.put(ctx, q);
-
+        // printf("103\n");
         assert_eq(mock.count_inodes(), i - 1);
         mock.end_op(ctx);
         assert_eq(mock.count_inodes(), i);

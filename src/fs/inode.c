@@ -71,7 +71,7 @@ void init_inodes(const SuperBlock* _sblock, const BlockCache* _cache) {
 
 // initialize in-memory inode.
 static void init_inode(Inode* inode) {
-    printk("Initing a new inode.\n");
+    // printk("Initing a new inode.\n");
     init_sleeplock(&inode->lock);
     init_rc(&inode->rc);
     init_list_node(&inode->node);
@@ -112,14 +112,14 @@ static void inode_sync(OpContext* ctx, Inode* inode, bool do_write);
 static int useless=0;
 // see `inode.h`.
 static void inode_lock(Inode* inode) {
-    printk("Inode %lld's ref count is %lld\n",inode->inode_no,inode->rc.count);
+    // printk("Inode %lld's ref count is %lld\n",inode->inode_no,inode->rc.count);
     ASSERT(inode->rc.count > 0);
     // TODO
     if (acquire_sleeplock(&inode->lock)){
         useless=0;
     }
     if (!inode->valid) {
-        
+        // 读出数据，inode自动变成有效的
         inode_sync(NULL, inode, false);
     }
 
@@ -154,7 +154,7 @@ static void inode_sync(OpContext* ctx, Inode* inode, bool do_write) {
 
 // see `inode.h`.
 static Inode* inode_get(usize inode_no) {
-    printk("Getting inode: %llu\n", inode_no);
+    // printk("Getting inode: %llu\n", inode_no);
     ASSERT(inode_no > 0);
     ASSERT(inode_no < sblock->num_inodes);
     // printk("152:\n");
@@ -203,7 +203,7 @@ static void inode_clear(OpContext* ctx, Inode* inode) {
     // TODO
     
     InodeEntry *entry=&inode->entry;
-    printk("Clearing inode: %lld\n",inode->inode_no);
+    // printk("Clearing inode: %lld\n",inode->inode_no);
     for (usize i=0;i<INODE_NUM_DIRECT;i++){
         if (entry->addrs[i]!=0){
             cache->free(ctx, entry->addrs[i]);
@@ -240,81 +240,53 @@ static Inode* inode_share(Inode* inode) {
 
 // see `inode.h`.
 static void inode_put(OpContext* ctx, Inode* inode) {
-    // TODO
+    // 1. 获取全局锁保护 rc 和链表
     acquire_spinlock(&lock);
-    ASSERT(inode->rc.count>0);
 
-    if (inode->rc.count > 1) {
-        inode->rc.count--;
+    // 2. 检查是否是最后一个引用，且文件已被 unlink（链接数为0）
+    // 注意：这里必须是 rc==1，如果是 0 则是逻辑错误，如果是 >1 则还不能删
+    if (inode->rc.count == 1&& inode->entry.num_links == 0) {
+        // 需要进行 I/O 操作，必须释放自旋锁
         release_spinlock(&lock);
-        return;
+        
+        inode_lock(inode);
+        // if (inode->valid ){
+        // release_spinlock(&lock);
+        // 清空文件内容（释放数据块）
+        inode_clear(ctx, inode);
+        // 在磁盘逻辑上标记该 inode 为无效/空闲
+        inode->entry.type = INODE_INVALID; // 假设 INODE_INVALID 为 0
+        // 将 inode 的元数据变更写回磁盘（sync 内部会处理 I/O）
+        inode_sync(ctx, inode, true);
+        inode_unlock(inode);
+        acquire_spinlock(&lock);
+
+        // }else {
+        //     inode_unlock(inode);
+        // }
+        
+        // 操作完成，重新获取全局锁以继续处理 rc
+        
     }
 
-    // ---------------------------------------------------------
-    // 情况 B: 最后一个引用 (rc == 1)
-    // ---------------------------------------------------------
-
-    // 1. 检查是否无效 (未加载)，或者链接数不为0 (无需物理删除)
-    //    在这两种情况下，我们只需要释放内存，不需要做磁盘操作。
-    if (inode->entry.num_links != 0) {
-        inode->rc.count--; // 1 -> 0
-        _detach_from_list(&inode->node);
-        release_spinlock(&lock);
-        kfree(inode);
-        return;
-    }
-
-    // 2. 需要物理删除 (valid == true && num_links == 0)
-    //    我们需要做 IO 操作，这需要睡眠锁，必须释放自旋锁。
-    
-    release_spinlock(&lock); // <--- 释放全局锁，允许并发
-    
-    inode_lock(inode);
-    inode_clear(ctx, inode); // 漫长的 IO 操作
-    inode_unlock(inode);
-
-    acquire_spinlock(&lock); // <--- 重新获取全局锁
-
-    // =========================================================
-    // 关键修正：双重检查 (Double Check)
-    // =========================================================
-    // 在我们 clear 的这段时间里，可能有人调用了 get()
-    if (inode->rc.count > 1) {
-        // 发现 rc 变成了 2 (或更多)！
-        // 意味着有人救活了这个 inode，我们不能释放内存。
-        // 文件内容已经被上面的 clear 清空了，但这符合逻辑（打开已删除的文件）。
-        inode->rc.count--; // 递减我自己的引用
-        release_spinlock(&lock);
-        return; // 直接返回，把 inode 留给那个新的持有者
-    }
-
-    // 3. 再次确认后，依然只有我一个引用 (rc == 1)
-    //    现在可以安全地释放内存了。
+    // 3. 递减引用计数
     inode->rc.count--;
-    _detach_from_list(&inode->node);
-    release_spinlock(&lock);
-    kfree(inode);
-}
-//     if (inode->rc.count>1||inode->entry.num_links!=0){
-//         inode->rc.count--;
-//         release_spinlock(&lock);
-//         return;
-//     }
-//     inode_lock(inode);
-//     inode->rc.count--; 
-//     _detach_from_list(&inode->node);
-    
-//     release_spinlock(&lock);
-    
-    
-//     inode_clear(ctx,inode);
-//     inode->entry.type=INODE_INVALID;
-//     inode_sync(ctx,inode,true);
-//     inode_unlock(inode);
 
-//     kfree(inode);
-    
-// }
+    // 4. 如果引用计数归零，回收内存
+    if (inode->rc.count == 0) {
+        // 从全局 inode 链表中移除
+        _detach_from_list(&inode->node);
+        
+        // 释放锁
+        release_spinlock(&lock);
+        
+        // 释放 Inode 结构体内存
+        kfree(inode);
+    } else {
+        // 还有其他引用，仅释放锁
+        release_spinlock(&lock);
+    }
+}
 
 /**
     @brief get which block is the offset of the inode in.
@@ -511,7 +483,7 @@ static usize inode_lookup(Inode* inode, const char* name, usize* index) {
             return dir.inode_no;
         }
     }
-    return -1;
+    return 0;
 }
 
 // see `inode.h`.
@@ -526,7 +498,7 @@ static usize inode_insert(OpContext* ctx,
     // cache->begin_op(&ctx);
     DirEntry dir;
     usize step=sizeof(DirEntry);
-    bool found_slot=false;
+    // bool found_slot=false;
     if (inode_lookup(inode,name,NULL)){
         return -1;
     }
@@ -537,17 +509,17 @@ static usize inode_insert(OpContext* ctx,
             break;//是否应该panic
         }
         if (dir.inode_no==0){
-            found_slot=true;
+            // found_slot=true;
             break;
         }
     }
-    if (!found_slot){
-        cache->begin_op(ctx);
-        entry->num_bytes+=step;
-        bool modified;
-        inode_map(ctx,inode,off,&modified);
-        cache->end_op(ctx);
-    }
+    // if (!found_slot){
+    //     cache->begin_op(ctx);
+    //     entry->num_bytes+=step;
+    //     bool modified;
+    //     inode_map(ctx,inode,off,&modified);
+    //     cache->end_op(ctx);
+    // }
 
     memset(&dir,0,step);
     
@@ -556,9 +528,9 @@ static usize inode_insert(OpContext* ctx,
     
     inode_write(ctx,inode,(u8 *)&dir,off,step);
     
-    if (!found_slot){
-        inode_sync(ctx, inode, true);
-    }
+    // if (!found_slot){
+    //     inode_sync(ctx, inode, true);
+    // }
     
     // cache->end_op(&ctx);
     return off/step;
