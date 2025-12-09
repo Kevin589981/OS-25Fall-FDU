@@ -171,8 +171,10 @@ void test_share()
     auto *r = inodes.get(ino);
 
     assert_eq(r->rc.count, 3);
-
+    
     mock.begin_op(ctx);
+    
+
     inodes.put(ctx, p);
     assert_eq(q->rc.count, 2);
     mock.end_op(ctx);
@@ -186,6 +188,20 @@ void test_share()
     assert_eq(mock.count_inodes(), 2);
     mock.end_op(ctx);
     assert_eq(mock.count_inodes(), 1);
+    // 自测
+    // mock.begin_op(ctx);
+    // usize ino2 = inodes.alloc(ctx,INODE_REGULAR);
+    // mock.end_op(ctx);
+    // assert_eq(mock.count_inodes(), 2);
+    // auto *s=inodes.get(ino2);
+    // mock.begin_op(ctx);
+    // assert_eq(s->rc.count, 1);
+    // // inodes.lock(q);
+    // // inodes.unlock(q);
+    // inodes.put(ctx,s);
+    // mock.end_op(ctx);
+    // assert_eq(mock.count_inodes(),1);
+
 }
 
 void test_small_file()
