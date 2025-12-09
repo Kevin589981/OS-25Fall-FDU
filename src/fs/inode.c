@@ -193,7 +193,7 @@ static Inode* inode_get(usize inode_no) {
     _insert_into_list(head.prev,&empty->node);
     empty->inode_no=inode_no;
     empty->rc.count=1;
-    empty->valid=false;
+    // empty->valid=false;
     release_spinlock(&lock);
 
     return empty;
@@ -240,54 +240,51 @@ static Inode* inode_share(Inode* inode) {
 
 // see `inode.h`.
 static void inode_put(OpContext* ctx, Inode* inode) {
-    // 1. 获取全局锁保护 rc 和链表
     acquire_spinlock(&lock);
 
-    // 2. 检查是否是最后一个引用，且文件已被 unlink（链接数为0）
-    // 注意：这里必须是 rc==1，如果是 0 则是逻辑错误，如果是 >1 则还不能删
-    if (inode->rc.count == 1&& inode->entry.num_links == 0) {
-        // 需要进行 I/O 操作，必须释放自旋锁
-        release_spinlock(&lock);
+    // 逻辑修正：
+    // 我们需要判断是否要删除文件。
+    // 1. 如果 inode->valid 为 true，直接看 num_links，如果 > 0 则肯定不用删。
+    // 2. 如果 inode->valid 为 false，我们不知道 num_links 是多少（内存里是假的 0），
+    //    此时必须从磁盘读取才能决定。
+    
+    // 所以，只有当 "是有效数据且链接数大于0" 时，我们才确定**不需要**删除。
+    // 其他情况（无效数据 OR 有效且链接数为0），都进入“潜在删除”流程。
+    bool confirmed_alive = inode->valid && inode->entry.num_links > 0;
+
+    if (inode->rc.count == 1 && !confirmed_alive) {
+        // 进入这里意味着：要么数据还没读（!valid），要么读了且链接数为0。
+        // 我们需要去确认并可能执行删除。
         
+        release_spinlock(&lock);
+
+        // 获取锁。如果 valid 为 false，inode_lock 内部会自动调用 sync(read) 加载数据！
+        // 这一步解决了 test_share 中 alloc 后 valid 为 false 的问题。
         inode_lock(inode);
-        // if (inode->valid ){
-        // release_spinlock(&lock);
-        // 清空文件内容（释放数据块）
-        inode_clear(ctx, inode);
-        // 在磁盘逻辑上标记该 inode 为无效/空闲
-        inode->entry.type = INODE_INVALID; // 假设 INODE_INVALID 为 0
-        // 将 inode 的元数据变更写回磁盘（sync 内部会处理 I/O）
-        inode_sync(ctx, inode, true);
+        
+        // 现在 valid 必然是 true 了。我们可以放心地检查真实的 num_links。
+        if (inode->entry.num_links == 0) {
+            // 确认可以删除
+            inode_clear(ctx, inode);
+            inode->entry.type = INODE_INVALID;
+            inode_sync(ctx, inode, true);
+        }
+        
         inode_unlock(inode);
         acquire_spinlock(&lock);
-
-        // }else {
-        //     inode_unlock(inode);
-        // }
-        
-        // 操作完成，重新获取全局锁以继续处理 rc
-        
     }
 
-    // 3. 递减引用计数
+    // 后续的内存回收逻辑不变
     inode->rc.count--;
 
-    // 4. 如果引用计数归零，回收内存
     if (inode->rc.count == 0) {
-        // 从全局 inode 链表中移除
         _detach_from_list(&inode->node);
-        
-        // 释放锁
         release_spinlock(&lock);
-        
-        // 释放 Inode 结构体内存
         kfree(inode);
     } else {
-        // 还有其他引用，仅释放锁
         release_spinlock(&lock);
     }
 }
-
 /**
     @brief get which block is the offset of the inode in.
 
