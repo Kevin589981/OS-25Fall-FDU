@@ -239,42 +239,55 @@ static Inode* inode_share(Inode* inode) {
 }
 
 // see `inode.h`.
+// see `inode.h`.
 static void inode_put(OpContext* ctx, Inode* inode) {
     acquire_spinlock(&lock);
 
-    // 逻辑修正：
-    // 我们需要判断是否要删除文件。
-    // 1. 如果 inode->valid 为 true，直接看 num_links，如果 > 0 则肯定不用删。
-    // 2. 如果 inode->valid 为 false，我们不知道 num_links 是多少（内存里是假的 0），
-    //    此时必须从磁盘读取才能决定。
-    
-    // 所以，只有当 "是有效数据且链接数大于0" 时，我们才确定**不需要**删除。
-    // 其他情况（无效数据 OR 有效且链接数为0），都进入“潜在删除”流程。
-    bool confirmed_alive = inode->valid && inode->entry.num_links > 0;
-
-    if (inode->rc.count == 1 && !confirmed_alive) {
-        // 进入这里意味着：要么数据还没读（!valid），要么读了且链接数为0。
-        // 我们需要去确认并可能执行删除。
+    // 第一轮检查（粗略检查）
+    // 这里即使 valid 为 false 也可以放行，因为我们会在里面 load
+    if (inode->rc.count == 1 && (!inode->valid || inode->entry.num_links == 0)) {
         
-        release_spinlock(&lock);
+        release_spinlock(&lock); // --- 开启竞态窗口 ---
 
-        // 获取锁。如果 valid 为 false，inode_lock 内部会自动调用 sync(read) 加载数据！
-        // 这一步解决了 test_share 中 alloc 后 valid 为 false 的问题。
+        // 获取 inode 锁
+        // 如果 valid=false，这里会触发磁盘读取 (Lazy Load)
+        // 这一步之后，inode->valid 必然为 true
         inode_lock(inode);
+
+        // --- 竞态修复核心开始 ---
         
-        // 现在 valid 必然是 true 了。我们可以放心地检查真实的 num_links。
-        if (inode->entry.num_links == 0) {
-            // 确认可以删除
+        // 重新获取全局锁，进行“二次确认”
+        acquire_spinlock(&lock);
+        
+        // 必须同时满足三个条件才能真正删除：
+        // 1. rc 依然是 1（没有其他线程在窗口期 get 了）
+        // 2. num_links 是 0（确实被 unlink 了）
+        // 3. valid 是 true (inode_lock 保证了这点，防御性检查)
+        if (inode->rc.count == 1 && inode->entry.num_links == 0) {
+            
+            // 只有确认安全了，才释放全局锁去进行 I/O
+            release_spinlock(&lock);
+            
+            // 执行删除操作
             inode_clear(ctx, inode);
             inode->entry.type = INODE_INVALID;
             inode_sync(ctx, inode, true);
+            
+        } else {
+            // 如果进到这里，说明在窗口期有别的线程 get 了这个 inode (rc > 1)
+            // 或者读完磁盘发现 num_links > 0
+            // 此时什么都不能做，直接释放全局锁
+            release_spinlock(&lock);
         }
         
+
         inode_unlock(inode);
+        
+        // 重新获取锁进入常规引用递减流程
         acquire_spinlock(&lock);
     }
 
-    // 后续的内存回收逻辑不变
+    // 此时持有全局 lock
     inode->rc.count--;
 
     if (inode->rc.count == 0) {
