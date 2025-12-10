@@ -109,15 +109,16 @@ static usize inode_alloc(OpContext* ctx, InodeType type) {
     return 0;
 }
 static void inode_sync(OpContext* ctx, Inode* inode, bool do_write);
-static int useless=0;
+// static int useless=0;
 // see `inode.h`.
 static void inode_lock(Inode* inode) {
     // printk("Inode %lld's ref count is %lld\n",inode->inode_no,inode->rc.count);
     ASSERT(inode->rc.count > 0);
     // TODO
-    if (acquire_sleeplock(&inode->lock)){
-        useless=0;
-    }
+    // if (acquire_sleeplock(&inode->lock)){
+    //     useless=0;
+    // }
+    ASSERT(acquire_sleeplock(&inode->lock));
     if (!inode->valid) {
         // 读出数据，inode自动变成有效的
         inode_sync(NULL, inode, false);
@@ -241,6 +242,7 @@ static Inode* inode_share(Inode* inode) {
 // see `inode.h`.
 // see `inode.h`.
 static void inode_put(OpContext* ctx, Inode* inode) {
+    // TODO
     acquire_spinlock(&lock);
 
     // 第一轮检查（粗略检查）
