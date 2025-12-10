@@ -549,23 +549,105 @@ static usize inode_insert(OpContext* ctx,
 }
 
 // see `inode.h`.
+static INLINE usize bytes_to_blocks(usize bytes) {
+    if (bytes == 0) return 0;
+    return (bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+}
+
 static void inode_remove(OpContext* ctx, Inode* inode, usize index) {
-    // TODO
-    InodeEntry *entry=&inode->entry;
-    if (index>=entry->num_bytes/sizeof(DirEntry))return;
+    InodeEntry *entry = &inode->entry;
+    usize total_entries = entry->num_bytes / sizeof(DirEntry);
     
+    // 1. 边界检查
+    if (index >= total_entries) return;
+
+    // 2. 将目标位置写入全0 (标记为删除)
     DirEntry dir;
-    memset(&dir,0,sizeof(DirEntry));
-    usize n=inode_write(ctx,inode,(u8 *)&dir,index*sizeof(DirEntry),sizeof(DirEntry));
-    if (n!=sizeof(DirEntry)){
+    memset(&dir, 0, sizeof(DirEntry));
+    usize n = inode_write(ctx, inode, (u8 *)&dir, index * sizeof(DirEntry), sizeof(DirEntry));
+    if (n != sizeof(DirEntry)) {
         PANIC();
     }
-    if (index+1==entry->num_bytes/sizeof(DirEntry)){
-        entry->num_bytes-=sizeof(DirEntry);
-    }
-    
-    return;
 
+    // 3. 检查是否需要缩容 (是否删除了最后一个有效项)
+    // 如果删除的不是最后一个项，直接返回 (留作空洞复用)
+    if (index + 1 != total_entries) {
+        return; 
+    }
+
+    // 4. 向前回溯，找到新的文件末尾 (处理尾部连续空洞的情况)
+    // 例如 [A, hole, B(deleted)] -> 此时 index 指向 B
+    // 我们需要循环检查，发现前一个是 hole，继续前移，直到找到 A 或开头
+    usize new_num_bytes = entry->num_bytes;
+    usize scan_idx = index; // 当前已知的末尾是 index (已被清零)
+    
+    // 从当前删除的位置向前扫描，直到找到一个非空的条目或者到达头部
+    while (scan_idx > 0) {
+        scan_idx--; // 看前一个
+        DirEntry temp_dir;
+        inode_read(inode, (u8*)&temp_dir, scan_idx * sizeof(DirEntry), sizeof(DirEntry));
+        if (temp_dir.inode_no != 0) {
+            // 找到了有效项，新大小应该是这个有效项之后
+            new_num_bytes = (scan_idx + 1) * sizeof(DirEntry);
+            break;
+        }
+        // 如果读出来是 0，说明也是空洞，继续向前
+        if (scan_idx == 0) {
+            // 扫描到了第0项还是空的，说明整个目录都空了
+            new_num_bytes = 0;
+        }
+    }
+    // 特殊情况：如果原先 index=0 且被删了，上面循环不会执行，size 直接设为 0
+    if (index == 0) {
+        new_num_bytes = 0;
+    }
+
+    // 5. 如果大小没有变化（例如中间删除），由于前面的 check 这里一般不会进
+    if (new_num_bytes == entry->num_bytes) return;
+
+    // 6. 核心逻辑：释放不再使用的物理块
+    usize old_blocks_count = bytes_to_blocks(entry->num_bytes);
+    usize new_blocks_count = bytes_to_blocks(new_num_bytes);
+
+    // 遍历所有需要释放的块号 (从后往前释放)
+    for (usize b = old_blocks_count; b > new_blocks_count; b--) {
+        usize block_idx_to_free = b - 1; // 转换为 0-based 索引
+
+        if (block_idx_to_free < INODE_NUM_DIRECT) {
+            // A. 释放直接块
+            if (entry->addrs[block_idx_to_free]) {
+                cache->free(ctx, entry->addrs[block_idx_to_free]);
+                entry->addrs[block_idx_to_free] = 0;
+            }
+        } else {
+            // B. 释放间接块指向的数据块
+            usize indirect_idx = block_idx_to_free - INODE_NUM_DIRECT;
+            if (entry->indirect) {
+                Block *idx_block = cache->acquire(entry->indirect);
+                u32 *addrs = get_addrs(idx_block);
+                
+                if (addrs[indirect_idx]) {
+                    cache->free(ctx, addrs[indirect_idx]);
+                    addrs[indirect_idx] = 0;
+                    // 这里必须 sync 间接块，因为我们修改了它的内容
+                    cache->sync(ctx, idx_block);
+                }
+                cache->release(idx_block);
+            }
+        }
+    }
+
+    // 7. 处理间接索引块本身的释放 (User 提到的重点)
+    // 如果新的大小已经不需要间接块了 (即完全装在直接块里)，但 entry->indirect 还在
+    // 说明间接块现在是空的（或者是无用的），应该释放它。
+    if (new_blocks_count <= INODE_NUM_DIRECT && entry->indirect != 0) {
+        cache->free(ctx, entry->indirect);
+        entry->indirect = 0;
+    }
+
+    // 8. 更新 inode 元数据并同步
+    entry->num_bytes = new_num_bytes;
+    inode_sync(ctx, inode, true);
 }
 
 InodeTree inodes = {
