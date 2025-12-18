@@ -24,18 +24,26 @@ NO_RETURN void idle_entry()
 
 NO_RETURN void kernel_entry()
 {
+    init_filesystem();
+
     printk("Hello world! (Core %lld)\n", cpuid());
     // proc_test();
     // vm_test();
     // user_proc_test();
-    io_test();
+    // io_test();
 
     /* LAB 4 TODO 3 BEGIN */
     
     /* LAB 4 TODO 3 END */
 
-    while (1)
-        yield();
+    /**
+     * (Final) TODO BEGIN 
+     * 
+     * Map init.S to user space and trap_return to run icode.
+     */
+
+
+    /* (Final) TODO END */
 }
 
 NO_INLINE NO_RETURN void _panic(const char *file, int line)
