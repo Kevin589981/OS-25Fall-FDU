@@ -6,193 +6,187 @@
 #include <fs/defines.h>
 
 /**
-    @brief the number of the root inode (i.e. the inode_no of `/`).
+    @brief 根 inode 的编号（即 `/` 的 inode_no）。
  */
 #define ROOT_INODE_NO 1
 
 /**
-    @brief an inode in memory.
+    @brief 内存中的 inode。
 
-    You can compare it to a `Block` because they have similar operating ways.
+    你可以将其与 `Block` 进行比较，因为它们有相似的操作方式。
 
     @see Block
  */
 typedef struct {
     /**
-        @brief the lock protecting the inode metadata and its content.
+        @brief 保护 inode 元数据及其内容的锁。
 
-        @note it does NOT protect `rc`, `node`, `valid`, etc, because they are
-        "runtime" variables, not "filesystem" metadata or data of the inode.
+        @note 它**不**保护 `rc`、`node`、`valid` 等，因为它们是“运行时”变量，而不是 inode 的“文件系统”元数据或数据。
      */
     SleepLock lock;
 
     /**
-        @brief the reference count of this inode.
+        @brief 该 inode 的引用计数。
 
-        Different from `Block`, an inode can be shared by multiple threads or
-        processes, so we need a reference count to track the number of
-        references to this inode.
+        与 `Block` 不同，一个 inode 可以被多个线程或进程共享，因此我们需要一个引用计数来跟踪该 inode 的引用数量。
      */
     RefCount rc;
 
     /**
-        @brief link this inode into a linked list.
+        @brief 将此 inode 链接到一个链表中。
      */
     ListNode node;
 
     /**
-        @brief the corresponding inode number on disk.
+        @brief 磁盘上对应的 inode 编号。
 
-        @note distinguish it from `block_no` in `Block`, which is the "block number".
+        @note 请将其与 `Block` 中的 `block_no`（即“块号”）区分开来。
 
-        `inode_no` should be the offset in block from the beginning of the inode area.
+        `inode_no` 应该是从 inode 区域起始处算起的块内偏移量。
      */
     usize inode_no;
 
     /**
-        @brief has the `entry` been loaded from disk?
+        @brief `entry` 是否已从磁盘加载？
      */
     bool valid;
 
     /**
-        @brief the real in-memory copy of the inode on disk.
+        @brief 磁盘上 inode 在内存中的真实副本。
      */
     InodeEntry entry; 
 } Inode;
 
 /**
-    @brief interface of inode layer.
+    @brief inode 层接口。
  */
 typedef struct {
     /**
-        @brief the root inode of the file system.
+        @brief 文件系统的根 inode。
 
-        @see `init_inodes` should initialize it to a valid inode.
+        @see `init_inodes` 应当将其初始化为一个有效的 inode。
      */
     Inode* root;
 
     /**
-        @brief allocate a new zero-initialized inode on disk.
+        @brief 在磁盘上分配一个新的零初始化 inode。
         
-        @param type the type of the inode to allocate.
+        @param type 要分配的 inode 类型。
 
-        @return the number of newly allocated inode.
+        @return 新分配的 inode 编号。
 
-        @throw panic if allocation fails (e.g. no more free inode).
+        @throw 如果分配失败（例如没有空闲 inode），则触发 panic。
      */
     usize (*alloc)(OpContext* ctx, InodeType type);
 
     /**
-        @brief acquire the sleep lock of `inode`.
+        @brief 获取 `inode` 的睡眠锁。
         
-        This method should be called before any write operation to `inode` and its
-        file content.
+        在对 `inode` 及其文件内容进行任何写操作之前，应调用此方法。
 
-        If the inode has not been loaded, this method should load it from disk.
+        如果 inode 尚未加载，此方法应从磁盘加载它。
 
-        @see `unlock` - the counterpart of this method.
+        @see `unlock` - 此方法的对应操作。
      */
     void (*lock)(Inode* inode);
 
     /**
-        @brief release the sleep lock of `inode`.
+        @brief 释放 `inode` 的睡眠锁。
         
-        @see `lock` - the counterpart of this method.
+        @see `lock` - 此方法的对应操作。
      */
     void (*unlock)(Inode* inode);
 
     /**
-        @brief synchronize the content of `inode` between memory and disk.
+        @brief 在内存和磁盘之间同步 `inode` 的内容。
         
-        Different from block cache, this method can either read or write the inode.
+        与块缓存不同，此方法既可以读取也可以写入 inode。
 
-        If `do_write` is true and the inode is valid, write the content of `inode` to disk.
+        如果 `do_write` 为真且 inode 有效，将 `inode` 的内容写入磁盘。
 
-        If `do_write` is false and the inode is invalid, read the content of `inode` from disk.
+        如果 `do_write` 为假且 inode 无效，从磁盘读取 `inode` 的内容。
 
-        If `do_write` is false and the inode is valid, do nothing.
+        如果 `do_write` 为假且 inode 有效，则什么也不做。
 
-        @note here "write to disk" means "sync with block cache", not "directly
-        write to underneath SD card".
+        @note 这里的“写入磁盘”意味着“与块缓存同步”，而不是“直接写入底层的 SD 卡”。
 
-        @note caller must hold the lock of `inode`.
+        @note 调用者必须持有 `inode` 的锁。
 
-        @throw panic if `do_write` is true and `inode` is invalid.
+        @throw 如果 `do_write` 为真且 `inode` 无效，则触发 panic。
      */
     void (*sync)(OpContext* ctx, Inode* inode, bool do_write);
 
     /**
-        @brief get an inode by its inode number.
+        @brief 通过 inode 编号获取一个 inode。
         
-        This method should increment the reference count of the inode by one.
+        此方法应将该 inode 的引用计数加一。
 
-        @note it does NOT have to load the inode from disk!
+        @note 它**不**需要从磁盘加载 inode！
 
-        @see `sync` will be responsible to load the content of inode.
+        @see `sync` 将负责加载 inode 的内容。
         
-        @return the `inode` of `inode_no`. `inode->valid` can be false.
+        @return `inode_no` 对应的 `inode`。`inode->valid` 可能为假。
 
-        @see `put` - the counterpart of this method.
+        @see `put` - 此方法的对应操作。
      */
     Inode* (*get)(usize inode_no);
 
     /**
-        @brief truncate all contents of `inode`.
+        @brief 截断 `inode` 的所有内容。
         
-        This method removes (i.e. "frees") all file blocks of `inode`.
+        此方法移除（即“释放”）`inode` 的所有文件块。
 
-        @note do not forget to reset related metadata of `inode`, e.g. `inode->entry.num_bytes`.
+        @note 不要忘记重置 `inode` 的相关元数据，例如 `inode->entry.num_bytes`。
 
-        @note caller must hold the lock of `inode`.
+        @note 调用者必须持有 `inode` 的锁。
      */
     void (*clear)(OpContext* ctx, Inode* inode);
 
     /**
-        @brief duplicate an inode.
+        @brief 复制一个 inode。
         
-        Call this if you want to share an inode with others.
+        如果你想与他人共享一个 inode，请调用此方法。
 
-        It should increment the reference count of `inode` by one.
+        它应该将 `inode` 的引用计数加一。
 
-        @return the duplicated inode (i.e. may just return `inode`).
+        @return 复制的 inode（即可能直接返回 `inode`）。
      */
     Inode* (*share)(Inode* inode);
 
     /**
-        @brief notify that you no longer need `inode`.
+        @brief 通知你不再需要 `inode`。
         
-        This method is also responsible to free the inode if no one needs it:
+        如果没人需要它，此方法还负责释放该 inode：
 
-        "No one needs it" means it is useless BOTH in-memory (`inode->rc == 0`) and on-disk
-        (`inode->entry.num_links == 0`).
+        “没人需要它”意味着它在内存中（`inode->rc == 0`）和磁盘上（`inode->entry.num_links == 0`）都已无用。
 
-        "Free the inode" means freeing all related file blocks and the inode itself.
+        “释放 inode”意味着释放所有相关的文件块以及 inode 本身。
 
-        @note do not forget `kfree(inode)` after you have done them all!
+        @note 完成所有这些操作后，不要忘记 `kfree(inode)`！
 
-        @note caller must NOT hold the lock of `inode`. i.e. caller should have `unlock`ed it.
+        @note 调用者必须**不**持有 `inode` 的锁。即调用者应该已经 `unlock` 了它。
 
-        @see `get` - the counterpart of this method.
+        @see `get` - 此方法的对应操作。
 
-        @see `clear` can be used to free all file blocks of `inode`.
+        @see `clear` 可用于释放 `inode` 的所有文件块。
      */
     void (*put)(OpContext* ctx, Inode* inode);
 
     /**
-        @brief read `count` bytes from `inode`, beginning at `offset`, to `dest`.
+        @brief 从 `inode` 读取 `count` 字节到 `dest`，从 `offset` 开始。
         
-        @return how many bytes you actually read.
+        @return 你实际读取了多少字节。
 
-        @note caller must hold the lock of `inode`.
+        @note 调用者必须持有 `inode` 的锁。
      */
     usize (*read)(Inode* inode, u8* dest, usize offset, usize count);
 
     /**
-        @brief write `count` bytes from `src` to `inode`, beginning at `offset`.
+        @brief 将 `src` 中的 `count` 字节写入 `inode`，从 `offset` 开始。
         
-        @return how many bytes you actually write.
+        @return 你实际写入了多少字节。
 
-        @note caller must hold the lock of `inode`.
+        @note 调用者必须持有 `inode` 的锁。
      */
     usize (*write)(OpContext* ctx,
                    Inode* inode,
@@ -201,34 +195,32 @@ typedef struct {
                    usize count);
 
     /**
-        @brief look up an entry named `name` in directory `inode`.
+        @brief 在目录 `inode` 中查找名为 `name` 的条目。
 
-        @param[out] index the index of found entry in this directory.
+        @param[out] index 找到的条目在该目录中的索引。
 
-        @return the inode number of the corresponding inode, or 0 if not found.
+        @return 对应 inode 的 inode 编号，如果未找到则为 0。
         
-        @note caller must hold the lock of `inode`.
+        @note 调用者必须持有 `inode` 的锁。
 
-        @throw panic if `inode` is not a directory.
+        @throw 如果 `inode` 不是目录，则触发 panic。
      */
     usize (*lookup)(Inode* inode, const char* name, usize* index);
 
     /**
-        @brief insert a new directory entry in directory `inode`.
+        @brief 在目录 `inode` 中插入一个新的目录项。
         
-        Add a new directory entry in `inode` called `name`, which points to inode 
-        with `inode_no`.
+        在 `inode` 中添加一个名为 `name` 的新目录项，指向编号为 `inode_no` 的 inode。
 
-        @return the index of new directory entry, or -1 if `name` already exists.
+        @return 新目录项的索引，如果 `name` 已存在则为 -1。
 
-        @note if the directory inode is full, you should grow the size of directory inode.
+        @note 如果目录 inode 已满，你应该增加目录 inode 的大小。
 
-        @note you do NOT need to change `inode->entry.num_links`. Another function
-        to be finished in our final lab will do this.
+        @note 你**不**需要更改 `inode->entry.num_links`。我们最终实验中要完成的另一个函数将处理此操作。
 
-        @note caller must hold the lock of `inode`.
+        @note 调用者必须持有 `inode` 的锁。
 
-        @throw panic if `inode` is not a directory.
+        @throw 如果 `inode` 不是目录，则触发 panic。
      */
     usize (*insert)(OpContext* ctx,
                     Inode* inode,
@@ -236,32 +228,32 @@ typedef struct {
                     usize inode_no);
 
     /**
-        @brief remove the directory entry at `index`.
+        @brief 移除 `index` 处的目录项。
         
-        If the corresponding entry is not used before, `remove` does nothing.
+        如果对应的条目之前未被使用，`remove` 什么也不做。
 
-        @note if the last entry is removed, you can shrink the size of directory inode.
-        If you like, you can also move entries to fill the hole.
+        @note 如果移除了最后一个条目，你可以缩小目录 inode 的大小。
+        如果你愿意，也可以移动条目来填补空洞。
 
-        @note caller must hold the lock of `inode`.
+        @note 调用者必须持有 `inode` 的锁。
 
-        @throw panic if `inode` is not a directory.
+        @throw 如果 `inode` 不是目录，则触发 panic。
      */
     void (*remove)(OpContext* ctx, Inode* inode, usize index);
 } InodeTree;
 
 /**
-    @brief the global inode layer instance.
+    @brief 全局 inode 层实例。
  */
 extern InodeTree inodes;
 
 /**
-    @brief initialize the inode layer.
+    @brief 初始化 inode 层。
 
-    @note do not forget to read the root inode from disk!
+    @note 不要忘记从磁盘读取根 inode！
 
-    @param sblock the loaded super block.
-    @param cache the initialized block cache.
+    @param sblock 已加载的超级块。
+    @param cache 已初始化的块缓存。
  */
 void init_inodes(const SuperBlock* sblock, const BlockCache* cache);
 

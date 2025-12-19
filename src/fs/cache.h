@@ -5,103 +5,101 @@
 #include <fs/defines.h>
 
 /**
-    @brief maximum number of distinct blocks that one atomic operation can hold.
+    @brief 一个原子操作可以持有的不同块的最大数量。
  */
 #define OP_MAX_NUM_BLOCKS 10
 
 /**
-    @brief the threshold of block cache to start eviction.
+    @brief 块缓存开始驱逐（eviction）的阈值。
 
-    if the number of cached blocks is no less than this threshold, we can
-    evict some blocks in `acquire` to keep block cache small.
+    如果已缓存块的数量不小于此阈值，我们可以在 `acquire` 中驱逐一些块，
+    以保持块缓存较小。
  */
 #define EVICTION_THRESHOLD 20
 
 /**
-    @brief a block in block cache.
+    @brief 块缓存中的一个块。
 
-    @note you can add any member to this struct as you want.
+    @note 你可以根据需要向此结构体添加任何成员。
  */
 typedef struct {
     /**
-        @brief the corresponding block number on disk.
+        @brief 磁盘上对应的块号。
 
-        @note should be protected by the global lock of the block cache.
+        @note 应受块缓存的全局锁保护。
 
-        @note required by our test. Do NOT remove it.
+        @note 我们的测试需要用到此字段。请勿删除。
      */
     usize block_no;
 
     /**
-        @brief list this block into a linked list.
+        @brief 将此块链接到一个链表中。
 
-        @note should be protected by the global lock of the block cache.
+        @note 应受块缓存的全局锁保护。
      */
     ListNode node;
 
     /**
-        @brief is the block already acquired by some thread or process?
+        @brief 该块是否已被某些线程或进程获取（占用）？
 
-        @note should be protected by the global lock of the block cache.
+        @note 应受块缓存的全局锁保护。
      */
     bool acquired;
 
     /**
-        @brief is the block pinned?
+        @brief 该块是否被固定（pinned）？
 
-        A pinned block should not be evicted from the cache.
+        被固定的块不应从缓存中被驱逐。
 
-        e.g. it is dirty.
+        例如：它是脏块（dirty）。
 
-        @note should be protected by the global lock of the block cache.
+        @note 应受块缓存的全局锁保护。
      */
     bool pinned;
 
     /**
-        @brief the sleep lock protecting `valid` and `data`.
+        @brief 保护 `valid` 和 `data` 的睡眠锁（SleepLock）。
      */
     SleepLock lock;
 
     /**
-        @brief is the content of block loaded from disk?
+        @brief 块的内容是否已从磁盘加载？
 
-        You may find it useless and it *is*. It is just a test flag read
-        by our test. In your code, you should:
+        你可能发现它没用，事实上确实如此。它只是我们的测试读取的一个测试标志。
+        在你的代码中，你应该：
 
-        * set `valid` to `false` when you allocate a new `Block` struct.
-        * set `valid` to `true` only after you load the content of block from
-       disk.
+        * 当你分配一个新的 `Block` 结构体时，将 `valid` 设为 `false`。
+        * 仅在从磁盘加载块内容后，才将 `valid` 设为 `true`。
 
-        @note required by our test. Do NOT remove it.
+        @note 我们的测试需要用到此字段。请勿删除。
      */
     bool valid;
     /**
-        @brief the real in-memory content of the block on disk.
+        @brief 磁盘块在内存中的真实内容。
      */
     u8 data[BLOCK_SIZE];
 } Block;
 
 /**
-    @brief an atomic operation context.
+    @brief 一个原子操作上下文。
 
-    @note add any member to this struct as you want.
+    @note 你可以根据需要向此结构体添加任何成员。
 
     @see begin_op, end_op
  */
 typedef struct {
     /**
-        @brief how many operation remains in this atomic operation?
+        @brief 此原子操作中还剩余多少次操作？
 
-        If `rm` is 0, any **new** `sync` will panic.
+        如果 `rm` 为 0，任何 **新** 的 `sync` 调用都会导致 panic。
      */
     usize rm;
     /**
-        @brief a timestamp (i.e. an ID) to identify this atomic operation.
+        @brief 用于标识此原子操作的时间戳（即 ID）。
 
-        @note your implementation does NOT have to use this field, just ignoring
-       it is OK too.
+        @note 你的实现不必使用此字段，忽略它也没关系。
 
-        @note only required by our test. Do NOT remove it.
+        @note 仅我们的测试需要用到。请勿删除。
      */
     usize ts;
 } OpContext;
@@ -109,147 +107,138 @@ typedef struct {
 
 typedef struct {
     /**
-        @return the number of cached blocks at this moment.
+        @return 返回此刻缓存块的数量。
 
-        @note only required by our test to print statistics.
+        @note 仅我们的测试需要用到以打印统计信息。
      */
     usize (*get_num_cached_blocks)();
 
     /**
-        @brief declare a block as acquired by the caller.
+        @brief 声明一个块已被调用者获取。
 
-        It reads the content of block at `block_no` from disk, and locks the
-       block so that the caller can exclusively modify it.
+        它从磁盘读取 `block_no` 处的块内容，并锁定该块，
+        以便调用者可以独占修改它。
 
-        @return the pointer to the locked block.
+        @return 指向已锁定块的指针。
 
-        @see `release` - the counterpart of this function.
+        @see `release` - 此函数的对应操作。
      */
     Block *(*acquire)(usize block_no);
 
     /**
-        @brief declare an acquired block as released by the caller.
+        @brief 声明一个已获取的块已被调用者释放。
 
-        It unlocks the block so that other threads can acquire it again.
+        它解锁该块，以便其他线程可以再次获取它。
 
-        @note it does not need to write the block content back to disk.
+        @note 它不需要将块内容写回磁盘。
      */
     void (*release)(Block *block);
 
-    // # NOTES FOR ATOMIC OPERATIONS
+    // # 原子操作说明
     //
-    // atomic operation has three states:
-    // * running: this atomic operation may have more modifications.
-    // * committed: this atomic operation is ended. No more modifications.
-    // * checkpointed: all modifications have been already persisted to disk.
+    // 原子操作有三种状态：
+    // * running（运行中）：此原子操作可能还有更多修改。
+    // * committed（已提交）：此原子操作已结束。不再有更多修改。
+    // * checkpointed（已检查点）：所有修改均已持久化到磁盘。
     //
-    // `begin_op` creates a new running atomic operation.
-    // `end_op` commits an atomic operation, and waits for it to be
-    // checkpointed.
+    // `begin_op` 创建一个新的运行中原子操作。
+    // `end_op` 提交一个原子操作，并等待其被 checkpointed（持久化）。
 
     /**
-        @brief begin a new atomic operation and initialize `ctx`.
+        @brief 开始一个新的原子操作并初始化 `ctx`。
 
-        If there are too many running operations (i.e. our logging is
-        too small to hold all of them), `begin_op` should sleep until
-        we can start a new operation.
+        如果有太多正在运行的操作（即我们的日志太小，无法容纳所有操作），
+        `begin_op` 应该睡眠，直到我们可以开始一个新的操作。
 
-        @param[out] ctx the context to be initialized.
+        @param[out] ctx 要被初始化的上下文。
 
-        @throw panic if `ctx` is NULL.
+        @throw panic 如果 `ctx` 为 NULL。
 
-        @see `end_op` - the counterpart of this function.
+        @see `end_op` - 此函数的对应操作。
      */
     void (*begin_op)(OpContext *ctx);
 
     /**
-        @brief synchronize the content of `block` to disk.
+        @brief 将 `block` 的内容同步到磁盘。
 
-        If `ctx` is NULL, it immediately writes the content of `block` to disk.
+        如果 `ctx` 为 NULL，它会立即将 `block` 的内容写入磁盘。
 
-        However this is very dangerous, since it may break atomicity of
-        concurrent atomic operations. YOU SHOULD USE THIS MODE WITH CARE.
+        然而这非常危险，因为它可能会破坏并发原子操作的原子性。
+        你应该谨慎使用此模式。
 
-        @param ctx the atomic operation context to which this block belongs.
+        @param ctx 此块所属的原子操作上下文。
 
-        @note the caller must hold the lock of `block`.
+        @note 调用者必须持有 `block` 的锁。
 
-        @throw panic if the number of blocks associated with `ctx` is larger
-                than `OP_MAX_NUM_BLOCKS` after `sync`
+        @throw panic 如果在 `sync` 之后，与 `ctx` 关联的块数大于 `OP_MAX_NUM_BLOCKS`。
      */
     void (*sync)(OpContext *ctx, Block *block);
 
     /**
-        @brief end the atomic operation managed by `ctx`.
+        @brief 结束由 `ctx` 管理的原子操作。
 
-        It sleeps until all associated blocks are written to disk.
+        它会睡眠直到所有关联的块都写入磁盘。
 
-        @param ctx the atomic operation context to be ended.
+        @param ctx 要结束的原子操作上下文。
 
-        @throw panic if `ctx` is NULL.
+        @throw panic 如果 `ctx` 为 NULL。
      */
     void (*end_op)(OpContext *ctx);
 
-    // # NOTES FOR BITMAP
+    // # 位图说明
     //
-    // every block on disk has a bit in bitmap, including blocks inside bitmap!
+    // 磁盘上的每个块在位图中都有一个位（bit），包括位图内部的块！
     //
-    // usually, MBR block, super block, inode blocks, log blocks and bitmap
-    // blocks are preallocated on disk, i.e. those bits for them are already set
-    // in bitmap. therefore when we allocate a new block, it usually returns a
-    // data block. however, nobody can prevent you freeing a non-data block :)
+    // 通常，MBR 块、超级块（super block）、inode 块、日志块和位图块
+    // 在磁盘上是预分配的，即位图中对应的位已经设置好了。
+    // 因此当我们分配一个新块时，它通常返回一个数据块。
+    // 但是，没人能阻止你释放一个非数据块 :)
 
     /**
-        @brief allocate a new zero-initialized block.
+        @brief 分配一个新的零初始化块。
 
-        It searches bitmap for a free block, mark it allocated and
-        returns the block number.
+        它在位图中搜索一个空闲块，将其标记为已分配并返回块号。
 
-        @param ctx since this function may write on-disk bitmap, it must be
-                   associated with an atomic operation.
-                   The caller must ensure that `ctx` is **running**.
+        @param ctx 由于此函数可能写入磁盘上的位图，因此必须与原子操作关联。
+                   调用者必须确保 `ctx` 处于 **running** 状态。
 
-        @return the block number of the allocated block.
+        @return 已分配块的块号。
 
-        @note you should use `acquire`, `sync` and `release` to do disk I/O
-                here.
+        @note 你应该在此处使用 `acquire`、`sync` 和 `release` 进行磁盘 I/O。
 
-        @throw panic if there is no free block on disk.
+        @throw panic 如果磁盘上没有空闲块。
      */
     usize (*alloc)(OpContext *ctx);
 
     /**
-        @brief free the block at `block_no` in bitmap.
+        @brief 在位图中释放 `block_no` 处的块。
 
-        It will NOT panic if `block_no` is already free or invalid.
+        如果 `block_no` 已经是空闲的或无效的，它**不会** panic。
 
-        @param ctx since this function may write on-disk bitmap, it must be
-                   associated with an atomic operation.
-                   The caller must ensure that `ctx` is **running**.
-        @param block_no the block number to be freed.
+        @param ctx 由于此函数可能写入磁盘上的位图，因此必须与原子操作关联。
+                   调用者必须确保 `ctx` 处于 **running** 状态。
+        @param block_no 要释放的块号。
 
-        @note you should use `acquire`, `sync` and `release` to do disk I/O
-                here.
+        @note 你应该在此处使用 `acquire`、`sync` 和 `release` 进行磁盘 I/O。
      */
     void (*free)(OpContext *ctx, usize block_no);
 } BlockCache;
 
 /**
-    @brief the global block cache instance.
+    @brief 全局块缓存实例。
  */
 extern BlockCache bcache;
 
 /**
-    @brief initialize the block cache.
+    @brief 初始化块缓存。
 
-    This method is also responsible for restoring logs after system crash,
+    此方法还负责在系统崩溃后恢复日志，
 
-    i.e. it should read the uncommitted blocks from log section and
-    write them back to their original positions.
+    即它应该从日志区读取未提交的块，并将它们写回其原始位置。
 
-    @param sblock the loaded super block.
-    @param device the initialized block device.
+    @param sblock 已加载的超级块。
+    @param device 已初始化的块设备。
 
-    @note You may want to put it into `*_init` method groups.
+    @note 你可能想把它放入 `*_init` 方法组中。
  */
 void init_bcache(const SuperBlock *sblock, const BlockDevice *device);

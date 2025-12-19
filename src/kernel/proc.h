@@ -11,17 +11,27 @@
 enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, DEEPSLEEPING, ZOMBIE };
 
 typedef struct UserContext {
-    // TODO: customize your trap frame
+    u64 sp, useless;
+    u64 spsr, elr;
+    u64 x[18];
 } UserContext;
 
 typedef struct KernelContext {
-    // TODO: customize your context
+    u64 lr, x0, x1;
+    u64 x[11];
 } KernelContext;
 
 // embeded data for procs
 struct schinfo {
-    // TODO: customize your sched info
+    u64 vruntime;
+    struct rb_node_ node;  // 改为红黑树节点
+    int nice;              // -20 到 19
+    u64 start_exec_time;
 };
+
+extern int prio_to_weight[];
+#define WEIGHT(priority) prio_to_weight[priority+20]
+#define NICE_0_LOAD 1024
 
 typedef struct Proc {
     bool killed;
@@ -40,6 +50,7 @@ typedef struct Proc {
     KernelContext *kcontext;
     struct oftable oftable;
     Inode *cwd;
+    SpinLock lock;
 } Proc;
 
 void init_kproc();
@@ -50,3 +61,11 @@ NO_RETURN void exit(int code);
 WARN_RESULT int wait(int *exitcode);
 WARN_RESULT int kill(int pid);
 WARN_RESULT int fork();
+
+
+#define MAX_PID 4096 // 定义系统支持的最大PID数量，可以根据需求调整
+#define BITS_PER_LONG (sizeof(unsigned long) * 8)
+#define BITMAP_SIZE (MAX_PID / BITS_PER_LONG)
+
+// 全局PID位图
+extern unsigned long pid_bitmap[BITMAP_SIZE];
