@@ -77,11 +77,11 @@ if __name__ == "__main__":
         # "src/kernel/cpu.h",
         # "src/kernel/cpu.c",
         # "src/kernel/pt.c",
-        "src/fs/inode.h",
-        "src/fs/inode.c",
-        "src/fs/cache.h",
-        "src/fs/cache.c",
-        "src/fs/test/inode_test.cpp",
+        # "src/fs/inode.h",
+        # "src/fs/inode.c",
+        # "src/fs/cache.h",
+        # "src/fs/cache.c",
+        # "src/fs/test/inode_test.cpp",
         # "src/driver/virtio_blk.c",
         # "src/common/sem.h",
         # "src/common/buf.h"
@@ -90,6 +90,8 @@ if __name__ == "__main__":
         # "src/aarch64/trap.S",
         # "src/test/user_proc_test.c",
         # "src/user/loop.S"
+        "src/fs/file.c",
+        "src/fs/file.h",
     ]
     
     # 定义输出文件路径

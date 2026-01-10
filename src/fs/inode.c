@@ -2,7 +2,7 @@
 #include <fs/inode.h>
 #include <kernel/mem.h>
 #include <kernel/printk.h>
-
+#include <kernel/sched.h>
 /**
     @brief the private reference to the super block.
 
@@ -727,9 +727,44 @@ static Inode* namex(const char* path,
                     char* name,
                     OpContext* ctx) {
     /* (Final) TODO BEGIN */
-    
+    Inode *inode;
+    if (*path=='/'){
+        inode=inodes.get(ROOT_INODE_NO);
+        while (*path=='/'){
+            path++;
+        }
+    }else{
+        inode=inodes.share(thisproc()->cwd);
+    }
+    while ((path=skipelem(path,name))!=NULL){
+        inodes.lock(inode);
+        if (nameiparent&&*path=='\0'){
+            inodes.unlock(inode);
+            return inode;
+        }
+        if (inode->entry.type!=INODE_DIRECTORY){
+            inodes.unlock(inode);
+            inodes.put(ctx,inode);
+            return NULL;
+        }
+        usize next_inode_no=inodes.lookup(inode,name,NULL);
+        if (next_inode_no==0){
+            inodes.unlock(inode);
+            inodes.put(ctx,inode);
+            return NULL;
+        }
+        inodes.unlock(inode);
+        inodes.put(ctx,inode);
+        Inode *next_inode=inodes.get(next_inode_no);
+        
+    }
+    if (nameiparent){
+        inodes.put(ctx,inode);
+        return NULL;
+    }
+    return inode;
     /* (Final) TODO END */
-    return 0;
+    // return 0;
 }
 
 Inode* namei(const char* path, OpContext* ctx) {

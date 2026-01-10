@@ -1,1563 +1,175 @@
-#inode.h
-
-#pragma once
-#include <common/list.h>
-#include <common/rc.h>
-#include <common/spinlock.h>
-#include <fs/cache.h>
-#include <fs/defines.h>
-
-/**
-    @brief the number of the root inode (i.e. the inode_no of `/`).
- */
-#define ROOT_INODE_NO 1
-
-/**
-    @brief an inode in memory.
-
-    You can compare it to a `Block` because they have similar operating ways.
-
-    @see Block
- */
-typedef struct {
-    /**
-        @brief the lock protecting the inode metadata and its content.
-
-        @note it does NOT protect `rc`, `node`, `valid`, etc, because they are
-        "runtime" variables, not "filesystem" metadata or data of the inode.
-     */
-    SleepLock lock;
-
-    /**
-        @brief the reference count of this inode.
-
-        Different from `Block`, an inode can be shared by multiple threads or
-        processes, so we need a reference count to track the number of
-        references to this inode.
-     */
-    RefCount rc;
-
-    /**
-        @brief link this inode into a linked list.
-     */
-    ListNode node;
-
-    /**
-        @brief the corresponding inode number on disk.
-
-        @note distinguish it from `block_no` in `Block`, which is the "block number".
-
-        `inode_no` should be the offset in block from the beginning of the inode area.
-     */
-    usize inode_no;
-
-    /**
-        @brief has the `entry` been loaded from disk?
-     */
-    bool valid;
-
-    /**
-        @brief the real in-memory copy of the inode on disk.
-     */
-    InodeEntry entry; 
-} Inode;
-
-/**
-    @brief interface of inode layer.
- */
-typedef struct {
-    /**
-        @brief the root inode of the file system.
-
-        @see `init_inodes` should initialize it to a valid inode.
-     */
-    Inode* root;
-
-    /**
-        @brief allocate a new zero-initialized inode on disk.
-        
-        @param type the type of the inode to allocate.
-
-        @return the number of newly allocated inode.
-
-        @throw panic if allocation fails (e.g. no more free inode).
-     */
-    usize (*alloc)(OpContext* ctx, InodeType type);
-
-    /**
-        @brief acquire the sleep lock of `inode`.
-        
-        This method should be called before any write operation to `inode` and its
-        file content.
-
-        If the inode has not been loaded, this method should load it from disk.
-
-        @see `unlock` - the counterpart of this method.
-     */
-    void (*lock)(Inode* inode);
-
-    /**
-        @brief release the sleep lock of `inode`.
-        
-        @see `lock` - the counterpart of this method.
-     */
-    void (*unlock)(Inode* inode);
-
-    /**
-        @brief synchronize the content of `inode` between memory and disk.
-        
-        Different from block cache, this method can either read or write the inode.
-
-        If `do_write` is true and the inode is valid, write the content of `inode` to disk.
-
-        If `do_write` is false and the inode is invalid, read the content of `inode` from disk.
-
-        If `do_write` is false and the inode is valid, do nothing.
-
-        @note here "write to disk" means "sync with block cache", not "directly
-        write to underneath SD card".
-
-        @note caller must hold the lock of `inode`.
-
-        @throw panic if `do_write` is true and `inode` is invalid.
-     */
-    void (*sync)(OpContext* ctx, Inode* inode, bool do_write);
-
-    /**
-        @brief get an inode by its inode number.
-        
-        This method should increment the reference count of the inode by one.
-
-        @note it does NOT have to load the inode from disk!
-
-        @see `sync` will be responsible to load the content of inode.
-        
-        @return the `inode` of `inode_no`. `inode->valid` can be false.
-
-        @see `put` - the counterpart of this method.
-     */
-    Inode* (*get)(usize inode_no);
-
-    /**
-        @brief truncate all contents of `inode`.
-        
-        This method removes (i.e. "frees") all file blocks of `inode`.
-
-        @note do not forget to reset related metadata of `inode`, e.g. `inode->entry.num_bytes`.
-
-        @note caller must hold the lock of `inode`.
-     */
-    void (*clear)(OpContext* ctx, Inode* inode);
-
-    /**
-        @brief duplicate an inode.
-        
-        Call this if you want to share an inode with others.
-
-        It should increment the reference count of `inode` by one.
-
-        @return the duplicated inode (i.e. may just return `inode`).
-     */
-    Inode* (*share)(Inode* inode);
-
-    /**
-        @brief notify that you no longer need `inode`.
-        
-        This method is also responsible to free the inode if no one needs it:
-
-        "No one needs it" means it is useless BOTH in-memory (`inode->rc == 0`) and on-disk
-        (`inode->entry.num_links == 0`).
-
-        "Free the inode" means freeing all related file blocks and the inode itself.
-
-        @note do not forget `kfree(inode)` after you have done them all!
-
-        @note caller must NOT hold the lock of `inode`. i.e. caller should have `unlock`ed it.
-
-        @see `get` - the counterpart of this method.
-
-        @see `clear` can be used to free all file blocks of `inode`.
-     */
-    void (*put)(OpContext* ctx, Inode* inode);
-
-    /**
-        @brief read `count` bytes from `inode`, beginning at `offset`, to `dest`.
-        
-        @return how many bytes you actually read.
-
-        @note caller must hold the lock of `inode`.
-     */
-    usize (*read)(Inode* inode, u8* dest, usize offset, usize count);
-
-    /**
-        @brief write `count` bytes from `src` to `inode`, beginning at `offset`.
-        
-        @return how many bytes you actually write.
-
-        @note caller must hold the lock of `inode`.
-     */
-    usize (*write)(OpContext* ctx,
-                   Inode* inode,
-                   u8* src,
-                   usize offset,
-                   usize count);
-
-    /**
-        @brief look up an entry named `name` in directory `inode`.
-
-        @param[out] index the index of found entry in this directory.
-
-        @return the inode number of the corresponding inode, or 0 if not found.
-        
-        @note caller must hold the lock of `inode`.
-
-        @throw panic if `inode` is not a directory.
-     */
-    usize (*lookup)(Inode* inode, const char* name, usize* index);
-
-    /**
-        @brief insert a new directory entry in directory `inode`.
-        
-        Add a new directory entry in `inode` called `name`, which points to inode 
-        with `inode_no`.
-
-        @return the index of new directory entry, or -1 if `name` already exists.
-
-        @note if the directory inode is full, you should grow the size of directory inode.
-
-        @note you do NOT need to change `inode->entry.num_links`. Another function
-        to be finished in our final lab will do this.
-
-        @note caller must hold the lock of `inode`.
-
-        @throw panic if `inode` is not a directory.
-     */
-    usize (*insert)(OpContext* ctx,
-                    Inode* inode,
-                    const char* name,
-                    usize inode_no);
-
-    /**
-        @brief remove the directory entry at `index`.
-        
-        If the corresponding entry is not used before, `remove` does nothing.
-
-        @note if the last entry is removed, you can shrink the size of directory inode.
-        If you like, you can also move entries to fill the hole.
-
-        @note caller must hold the lock of `inode`.
-
-        @throw panic if `inode` is not a directory.
-     */
-    void (*remove)(OpContext* ctx, Inode* inode, usize index);
-} InodeTree;
-
-/**
-    @brief the global inode layer instance.
- */
-extern InodeTree inodes;
-
-/**
-    @brief initialize the inode layer.
-
-    @note do not forget to read the root inode from disk!
-
-    @param sblock the loaded super block.
-    @param cache the initialized block cache.
- */
-void init_inodes(const SuperBlock* sblock, const BlockCache* cache);
+# src/fs/file.c
+
+     1  | #include "file.h"
+     2  | #include <common/defines.h>
+     3  | #include <common/spinlock.h>
+     4  | #include <common/sem.h>
+     5  | #include <fs/inode.h>
+     6  | #include <common/list.h>
+     7  | #include <kernel/mem.h>
+     8  | 
+     9  | // the global file table.
+    10  | static struct ftable ftable;
+    11  | 
+    12  | void init_ftable() {
+    13  |     // TODO: initialize your ftable.
+    14  | }
+    15  | 
+    16  | void init_oftable(struct oftable *oftable) {
+    17  |     // TODO: initialize your oftable for a new process.
+    18  | }
+    19  | 
+    20  | /* Allocate a file structure. */
+    21  | struct file* file_alloc() {
+    22  |     /* (Final) TODO BEGIN */
+    23  |     
+    24  |     /* (Final) TODO END */
+    25  |     return 0;
+    26  | }
+    27  | 
+    28  | /* Increment ref count for file f. */
+    29  | struct file* file_dup(struct file* f) {
+    30  |     /* (Final) TODO BEGIN */
+    31  |     
+    32  |     /* (Final) TODO END */
+    33  |     return f;
+    34  | }
+    35  | 
+    36  | /* Close file f. (Decrement ref count, close when reaches 0.) */
+    37  | void file_close(struct file* f) {
+    38  |     /* (Final) TODO BEGIN */
+    39  |     
+    40  |     /* (Final) TODO END */
+    41  | }
+    42  | 
+    43  | /* Get metadata about file f. */
+    44  | int file_stat(struct file* f, struct stat* st) {
+    45  |     /* (Final) TODO BEGIN */
+    46  |     
+    47  |     /* (Final) TODO END */
+    48  |     return -1;
+    49  | }
+    50  | 
+    51  | /* Read from file f. */
+    52  | isize file_read(struct file* f, char* addr, isize n) {
+    53  |     /* (Final) TODO BEGIN */
+    54  |     
+    55  |     /* (Final) TODO END */
+    56  |     return 0;
+    57  | }
+    58  | 
+    59  | /* Write to file f. */
+    60  | isize file_write(struct file* f, char* addr, isize n) {
+    61  |     /* (Final) TODO BEGIN */
+    62  |     
+    63  |     /* (Final) TODO END */
+    64  |     return 0;
+    65  | }
 ================================================================================
-#inode.c
-
-#include <common/string.h>
-#include <fs/inode.h>
-#include <kernel/mem.h>
-#include <kernel/printk.h>
-
-/**
-    @brief the private reference to the super block.
-
-    @note we need these two variables because we allow the caller to
-            specify the block cache and super block to use.
-            Correspondingly, you should NEVER use global instance of
-            them.
-
-    @see init_inodes
- */
-static const SuperBlock* sblock;
-
-/**
-    @brief the reference to the underlying block cache.
- */
-static const BlockCache* cache;
-
-/**
-    @brief global lock for inode layer.
-
-    Use it to protect anything you need.
-
-    e.g. the list of allocated blocks, ref counts, etc.
- */
-static SpinLock lock;
-
-/**
-    @brief the list of all allocated in-memory inodes.
-
-    We use a linked list to manage all allocated inodes.
-
-    You can implement your own data structure if you want better performance.
-
-    @see Inode
- */
-static ListNode head;
-
-
-// return which block `inode_no` lives on.
-static INLINE usize to_block_no(usize inode_no) {
-    return sblock->inode_start + (inode_no / (INODE_PER_BLOCK));
-}
-
-// return the pointer to on-disk inode.
-static INLINE InodeEntry* get_entry(Block* block, usize inode_no) {
-    return ((InodeEntry*)block->data) + (inode_no % INODE_PER_BLOCK);
-}
-
-// return address array in indirect block.
-static INLINE u32* get_addrs(Block* block) {
-    return ((IndirectBlock*)block->data)->addrs;
-}
-
-// initialize inode tree.
-void init_inodes(const SuperBlock* _sblock, const BlockCache* _cache) {
-    init_spinlock(&lock);
-    init_list_node(&head);
-    sblock = _sblock;
-    cache = _cache;
-
-    if (ROOT_INODE_NO < sblock->num_inodes)
-        inodes.root = inodes.get(ROOT_INODE_NO);
-    else
-        printk("(warn) init_inodes: no root inode.\n");
-}
-
-// initialize in-memory inode.
-static void init_inode(Inode* inode) {
-    init_sleeplock(&inode->lock);
-    init_rc(&inode->rc);
-    init_list_node(&inode->node);
-    inode->inode_no = 0;
-    inode->valid = false;
-}
-
-// see `inode.h`.
-static usize inode_alloc(OpContext* ctx, InodeType type) {
-    ASSERT(type != INODE_INVALID);
-
-    // TODO
-    return 0;
-}
-
-// see `inode.h`.
-static void inode_lock(Inode* inode) {
-    ASSERT(inode->rc.count > 0);
-    // TODO
-}
-
-// see `inode.h`.
-static void inode_unlock(Inode* inode) {
-    ASSERT(inode->rc.count > 0);
-    // TODO
-}
-
-// see `inode.h`.
-static void inode_sync(OpContext* ctx, Inode* inode, bool do_write) {
-    // TODO
-}
-
-// see `inode.h`.
-static Inode* inode_get(usize inode_no) {
-    ASSERT(inode_no > 0);
-    ASSERT(inode_no < sblock->num_inodes);
-    _acquire_spinlock(&lock);
-    // TODO
-    return NULL;
-}
-// see `inode.h`.
-static void inode_clear(OpContext* ctx, Inode* inode) {
-    // TODO
-}
-
-// see `inode.h`.
-static Inode* inode_share(Inode* inode) {
-    // TODO
-    return 0;
-}
-
-// see `inode.h`.
-static void inode_put(OpContext* ctx, Inode* inode) {
-    // TODO
-}
-
-/**
-    @brief get which block is the offset of the inode in.
-
-    e.g. `inode_map(ctx, my_inode, 1234, &modified)` will return the block_no
-    of the block that contains the 1234th byte of the file
-    represented by `my_inode`.
-
-    If a block has not been allocated for that byte, `inode_map` will
-    allocate a new block and update `my_inode`, at which time, `modified`
-    will be set to true.
-
-    HOWEVER, if `ctx == NULL`, `inode_map` will NOT try to allocate any new block,
-    and when it finds that the block has not been allocated, it will return 0.
-    
-    @param[out] modified true if some new block is allocated and `inode`
-    has been changed.
-
-    @return usize the block number of that block, or 0 if `ctx == NULL` and
-    the required block has not been allocated.
-
-    @note the caller must hold the lock of `inode`.
- */
-static usize inode_map(OpContext* ctx,
-                       Inode* inode,
-                       usize offset,
-                       bool* modified) {
-    // TODO
-    return 0;
-}
-
-// see `inode.h`.
-static usize inode_read(Inode* inode, u8* dest, usize offset, usize count) {
-    InodeEntry* entry = &inode->entry;
-    if (count + offset > entry->num_bytes)
-        count = entry->num_bytes - offset;
-    usize end = offset + count;
-    ASSERT(offset <= entry->num_bytes);
-    ASSERT(end <= entry->num_bytes);
-    ASSERT(offset <= end);
-
-    // TODO
-    return 0;
-}
-
-// see `inode.h`.
-static usize inode_write(OpContext* ctx,
-                         Inode* inode,
-                         u8* src,
-                         usize offset,
-                         usize count) {
-    InodeEntry* entry = &inode->entry;
-    usize end = offset + count;
-    ASSERT(offset <= entry->num_bytes);
-    ASSERT(end <= INODE_MAX_BYTES);
-    ASSERT(offset <= end);
-
-    // TODO
-    return 0;
-}
-
-// see `inode.h`.
-static usize inode_lookup(Inode* inode, const char* name, usize* index) {
-    InodeEntry* entry = &inode->entry;
-    ASSERT(entry->type == INODE_DIRECTORY);
-
-    // TODO
-    return 0;
-}
-
-// see `inode.h`.
-static usize inode_insert(OpContext* ctx,
-                          Inode* inode,
-                          const char* name,
-                          usize inode_no) {
-    InodeEntry* entry = &inode->entry;
-    ASSERT(entry->type == INODE_DIRECTORY);
-
-    // TODO
-    return 0;
-}
-
-// see `inode.h`.
-static void inode_remove(OpContext* ctx, Inode* inode, usize index) {
-    // TODO
-}
-
-InodeTree inodes = {
-    .alloc = inode_alloc,
-    .lock = inode_lock,
-    .unlock = inode_unlock,
-    .sync = inode_sync,
-    .get = inode_get,
-    .clear = inode_clear,
-    .share = inode_share,
-    .put = inode_put,
-    .read = inode_read,
-    .write = inode_write,
-    .lookup = inode_lookup,
-    .insert = inode_insert,
-    .remove = inode_remove,
-};
-================================================================================
-#cache.h
-
-#pragma once
-#include <common/list.h>
-#include <common/sem.h>
-#include <fs/block_device.h>
-#include <fs/defines.h>
-
-/**
-    @brief 一个原子操作可以持有的不同块的最大数量。
- */
-#define OP_MAX_NUM_BLOCKS 10
-
-/**
-    @brief 块缓存开始驱逐（eviction）的阈值。
-
-    如果已缓存块的数量不小于此阈值，我们可以在 `acquire` 中驱逐一些块，
-    以保持块缓存较小。
- */
-#define EVICTION_THRESHOLD 20
-
-/**
-    @brief 块缓存中的一个块。
-
-    @note 你可以根据需要向此结构体添加任何成员。
- */
-typedef struct {
-    /**
-        @brief 磁盘上对应的块号。
-
-        @note 应受块缓存的全局锁保护。
-
-        @note 我们的测试需要用到此字段。请勿删除。
-     */
-    usize block_no;
-
-    /**
-        @brief 将此块链接到一个链表中。
-
-        @note 应受块缓存的全局锁保护。
-     */
-    ListNode node;
-
-    /**
-        @brief 该块是否已被某些线程或进程获取（占用）？
-
-        @note 应受块缓存的全局锁保护。
-     */
-    bool acquired;
-
-    /**
-        @brief 该块是否被固定（pinned）？
-
-        被固定的块不应从缓存中被驱逐。
-
-        例如：它是脏块（dirty）。
-
-        @note 应受块缓存的全局锁保护。
-     */
-    bool pinned;
-
-    /**
-        @brief 保护 `valid` 和 `data` 的睡眠锁（SleepLock）。
-     */
-    SleepLock lock;
-
-    /**
-        @brief 块的内容是否已从磁盘加载？
-
-        你可能发现它没用，事实上确实如此。它只是我们的测试读取的一个测试标志。
-        在你的代码中，你应该：
-
-        * 当你分配一个新的 `Block` 结构体时，将 `valid` 设为 `false`。
-        * 仅在从磁盘加载块内容后，才将 `valid` 设为 `true`。
-
-        @note 我们的测试需要用到此字段。请勿删除。
-     */
-    bool valid;
-    /**
-        @brief 磁盘块在内存中的真实内容。
-     */
-    u8 data[BLOCK_SIZE];
-} Block;
-
-/**
-    @brief 一个原子操作上下文。
-
-    @note 你可以根据需要向此结构体添加任何成员。
-
-    @see begin_op, end_op
- */
-typedef struct {
-    /**
-        @brief 此原子操作中还剩余多少次操作？
-
-        如果 `rm` 为 0，任何 **新** 的 `sync` 调用都会导致 panic。
-     */
-    usize rm;
-    /**
-        @brief 用于标识此原子操作的时间戳（即 ID）。
-
-        @note 你的实现不必使用此字段，忽略它也没关系。
-
-        @note 仅我们的测试需要用到。请勿删除。
-     */
-    usize ts;
-} OpContext;
-
-
-typedef struct {
-    /**
-        @return 返回此刻缓存块的数量。
-
-        @note 仅我们的测试需要用到以打印统计信息。
-     */
-    usize (*get_num_cached_blocks)();
-
-    /**
-        @brief 声明一个块已被调用者获取。
-
-        它从磁盘读取 `block_no` 处的块内容，并锁定该块，
-        以便调用者可以独占修改它。
-
-        @return 指向已锁定块的指针。
-
-        @see `release` - 此函数的对应操作。
-     */
-    Block *(*acquire)(usize block_no);
-
-    /**
-        @brief 声明一个已获取的块已被调用者释放。
-
-        它解锁该块，以便其他线程可以再次获取它。
-
-        @note 它不需要将块内容写回磁盘。
-     */
-    void (*release)(Block *block);
-
-    // # 原子操作说明
-    //
-    // 原子操作有三种状态：
-    // * running（运行中）：此原子操作可能还有更多修改。
-    // * committed（已提交）：此原子操作已结束。不再有更多修改。
-    // * checkpointed（已检查点）：所有修改均已持久化到磁盘。
-    //
-    // `begin_op` 创建一个新的运行中原子操作。
-    // `end_op` 提交一个原子操作，并等待其被 checkpointed（持久化）。
-
-    /**
-        @brief 开始一个新的原子操作并初始化 `ctx`。
-
-        如果有太多正在运行的操作（即我们的日志太小，无法容纳所有操作），
-        `begin_op` 应该睡眠，直到我们可以开始一个新的操作。
-
-        @param[out] ctx 要被初始化的上下文。
-
-        @throw panic 如果 `ctx` 为 NULL。
-
-        @see `end_op` - 此函数的对应操作。
-     */
-    void (*begin_op)(OpContext *ctx);
-
-    /**
-        @brief 将 `block` 的内容同步到磁盘。
-
-        如果 `ctx` 为 NULL，它会立即将 `block` 的内容写入磁盘。
-
-        然而这非常危险，因为它可能会破坏并发原子操作的原子性。
-        你应该谨慎使用此模式。
-
-        @param ctx 此块所属的原子操作上下文。
-
-        @note 调用者必须持有 `block` 的锁。
-
-        @throw panic 如果在 `sync` 之后，与 `ctx` 关联的块数大于 `OP_MAX_NUM_BLOCKS`。
-     */
-    void (*sync)(OpContext *ctx, Block *block);
-
-    /**
-        @brief 结束由 `ctx` 管理的原子操作。
-
-        它会睡眠直到所有关联的块都写入磁盘。
-
-        @param ctx 要结束的原子操作上下文。
-
-        @throw panic 如果 `ctx` 为 NULL。
-     */
-    void (*end_op)(OpContext *ctx);
-
-    // # 位图说明
-    //
-    // 磁盘上的每个块在位图中都有一个位（bit），包括位图内部的块！
-    //
-    // 通常，MBR 块、超级块（super block）、inode 块、日志块和位图块
-    // 在磁盘上是预分配的，即位图中对应的位已经设置好了。
-    // 因此当我们分配一个新块时，它通常返回一个数据块。
-    // 但是，没人能阻止你释放一个非数据块 :)
-
-    /**
-        @brief 分配一个新的零初始化块。
-
-        它在位图中搜索一个空闲块，将其标记为已分配并返回块号。
-
-        @param ctx 由于此函数可能写入磁盘上的位图，因此必须与原子操作关联。
-                   调用者必须确保 `ctx` 处于 **running** 状态。
-
-        @return 已分配块的块号。
-
-        @note 你应该在此处使用 `acquire`、`sync` 和 `release` 进行磁盘 I/O。
-
-        @throw panic 如果磁盘上没有空闲块。
-     */
-    usize (*alloc)(OpContext *ctx);
-
-    /**
-        @brief 在位图中释放 `block_no` 处的块。
-
-        如果 `block_no` 已经是空闲的或无效的，它**不会** panic。
-
-        @param ctx 由于此函数可能写入磁盘上的位图，因此必须与原子操作关联。
-                   调用者必须确保 `ctx` 处于 **running** 状态。
-        @param block_no 要释放的块号。
-
-        @note 你应该在此处使用 `acquire`、`sync` 和 `release` 进行磁盘 I/O。
-     */
-    void (*free)(OpContext *ctx, usize block_no);
-} BlockCache;
-
-/**
-    @brief 全局块缓存实例。
- */
-extern BlockCache bcache;
-
-/**
-    @brief 初始化块缓存。
-
-    此方法还负责在系统崩溃后恢复日志，
-
-    即它应该从日志区读取未提交的块，并将它们写回其原始位置。
-
-    @param sblock 已加载的超级块。
-    @param device 已初始化的块设备。
-
-    @note 你可能想把它放入 `*_init` 方法组中。
- */
-void init_bcache(const SuperBlock *sblock, const BlockDevice *device);
-================================================================================
-#cache.c
-
-#include <common/bitmap.h>
-#include <common/string.h>
-#include <fs/cache.h>
-#include <kernel/mem.h>
-#include <kernel/printk.h>
-#include <kernel/proc.h>
-static int num_cached_blocks=0;
-/**
-    @brief 超级块的私有引用。
-
-    @note 我们需要这两个变量，因为我们允许调用者指定要使用的块设备和超级块。
-            相应地，你**绝不**应该使用它们的全局实例，
-            例如 `get_super_block`，`block_device`。
-
-    @see init_bcache
- */
-static const SuperBlock *sblock;
-
-/**
-    @brief 对底层块设备的引用。
- */
-static const BlockDevice *device; 
-
-/**
-    @brief 块缓存的全局锁。
-
-    用它来保护任何你需要保护的东西。
-
-    例如：已分配块的列表等。
- */
-static SpinLock lock;
-
-/**
-    @brief 所有已分配的内存中块的列表。
-
-    我们使用链表来管理所有已分配的缓存块。
-
-    如果你想要更好的性能，可以实现你自己的数据结构。
-
-    @see Block
- */
-static ListNode head;
-
-static LogHeader header; // 日志头块的内存副本。
-
-/**
-    @brief 用于维护其他日志状态的结构体。
-    
-    你可能想知道我们在哪里存储某些状态，例如：
-    
-    * 有多少原子操作正在运行？
-    * 我们正在进行检查点操作（checkpointing）吗？
-    * 如何通知 `end_op` 检查点已完成？
-
-    把它们放在这里！
-
-    @see cache_begin_op, cache_end_op, cache_sync
- */
-struct {
-    /* 在此放置你的字段 */
-    SpinLock lock;
-    int outstanding;
-    bool committing;
-    Semaphore sem;
-} log;
-
-// 从磁盘读取内容。
-static INLINE void device_read(Block *block) {
-    device->read(block->block_no, block->data);
-}
-
-// 将内容写回磁盘。
-static INLINE void device_write(Block *block) {
-    device->write(block->block_no, block->data);
-}
-
-// 从磁盘读取日志头。
-static INLINE void read_header() {
-    device->read(sblock->log_start, (u8 *)&header);
-}
-
-// 将日志头写回磁盘。
-static INLINE void write_header() {
-    device->write(sblock->log_start, (u8 *)&header);
-}
-
-// 初始化一个块结构体。
-static void init_block(Block *block) {
-    block->block_no = 0;
-    init_list_node(&block->node);
-    block->acquired = false;
-    block->pinned = false;
-
-    init_sleeplock(&block->lock);
-    block->valid = false;
-    memset(block->data, 0, sizeof(block->data));
-}
-
-// see `cache.h`.
-static usize get_num_cached_blocks() {
-    // TODO
-    acquire_spinlock(&lock);
-    usize n=num_cached_blocks;
-    release_spinlock(&lock);
-    return n;
-}
-
-// see `cache.h`.
-static Block *cache_acquire(usize block_no) {
-    // TODO
-    acquire_spinlock(&lock);
-    Block *b=NULL;
-
-    _for_in_list(this_node, &head){
-        if (this_node==&head){
-            continue;
-        }
-        Block *current=container_of(this_node,Block,node);
-        if (current->block_no==block_no){
-            b=current;
-            _detach_from_list(this_node);
-            _insert_into_list(&head,this_node);
-            b->acquired=TRUE;
-            release_spinlock(&lock);
-            unalertable_acquire_sleeplock(&b->lock);
-            return b;
-        }
-
-
-    }
-    if (num_cached_blocks>=EVICTION_THRESHOLD){
-        _for_in_list_reverse(node,&head){
-            if (node==&head){
-                continue;
-            }
-            Block *victim=container_of(node,Block,node);
-            if (!victim->acquired && !victim->pinned){
-                b=victim;
-                _detach_from_list(&b->node);
-                break;
-            }
-
-        }
-    }
-    if (b==NULL){
-        b=(Block *)kalloc(sizeof(Block));
-        if (b==NULL){
-            PANIC();
-        }
-        init_block(b);
-        num_cached_blocks++;
-    }
-    b->block_no=block_no;
-    b->valid=FALSE;
-    b->acquired=TRUE;
-    b->pinned=FALSE;
-    _insert_into_list(&head, &b->node);
-    release_spinlock(&lock);
-    unalertable_acquire_sleeplock(&b->lock);
-    if (!b->valid){
-        device_read(b);
-        b->valid=TRUE;
-    }
-
-    return b;
-}
-
-// see `cache.h`.
-static void cache_release(Block *block) {
-    // TODO
-    acquire_spinlock(&lock);
-    block->acquired=FALSE;
-    release_spinlock(&lock);
-    release_sleeplock(&block->lock);
-}
-
-// see `cache.h`.
-void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
-    sblock = _sblock;
-    device = _device;
-
-    // TODO
-    init_spinlock(&lock);
-    init_list_node(&head);
-    init_spinlock(&log.lock);
-    init_sem(&log.sem,0);
-    log.outstanding=0;
-    log.committing=FALSE;
-    read_header();
-    if (header.num_blocks>0){
-        for (usize i=0;i<header.num_blocks;i++){
-            Block buf_block;
-            buf_block.block_no=sblock->log_start+1+i;
-            device_read(&buf_block);
-            buf_block.block_no=header.block_no[i];
-            device_write(&buf_block);
-        }
-        header.num_blocks=0;
-        write_header();
-    }
-
-}
-
-// see `cache.h`.
-static void cache_begin_op(OpContext *ctx) {
-    // TODO
-    acquire_spinlock(&log.lock);
-    while (1){
-        if (log.committing){
-            release_spinlock(&log.lock);
-            unalertable_wait_sem(&log.sem);
-            acquire_spinlock(&log.lock);
-        }else if (header.num_blocks+(log.outstanding+1)*OP_MAX_NUM_BLOCKS>LOG_MAX_SIZE){
-            release_spinlock(&log.lock);
-            unalertable_wait_sem(&log.sem);
-            acquire_spinlock(&log.lock);
-        }else{
-            log.outstanding++;
-            release_spinlock(&log.lock);
-            break;
-        }
-    }
-    ctx->rm=OP_MAX_NUM_BLOCKS;
-}
-
-// see `cache.h`.
-static void cache_sync(OpContext *ctx, Block *block) {
-    // TODO
-    if (ctx==NULL){
-        device_write(block);
-        return;
-    }
-    acquire_spinlock(&log.lock);
-    // 如果这个块已经在当前事务的日志里了，什么都不用做，直接返回
-    for (usize i = 0; i < header.num_blocks; i++) {
-        if (header.block_no[i] == block->block_no) {
-            release_spinlock(&log.lock);
-            return; // <--- 关键：直接返回，不扣 rm
-        }
-    }
-
-    // 2. 如果没找到，说明这是一个新加入事务的块，此时才检查配额
-    if (ctx->rm <= 0) {
-        // 此时释放锁再 panic 比较好，虽然 panic 会停机，但保持代码整洁
-        release_spinlock(&log.lock);
-        PANIC();
-    }
-    ctx->rm--; 
-    acquire_spinlock(&lock);
-    block->pinned = TRUE;
-    release_spinlock(&lock);
-
-
-    header.block_no[header.num_blocks] = block->block_no;
-    header.num_blocks++;
-    
-    release_spinlock(&log.lock);
-}
-void commit(){
-    if (header.num_blocks>0){
-        for (usize i=0;i<header.num_blocks;i++){
-            Block *b=cache_acquire(header.block_no[i]);
-            usize dest=b->block_no;
-            b->block_no=sblock->log_start+1+i;
-            device_write(b);
-            b->block_no=dest;
-            cache_release(b);
-            
-        }
-        write_header();
-        for (usize i = 0; i < header.num_blocks; i++) {
-            Block buf_block;
-            buf_block.block_no = sblock->log_start + 1 + i;
-            device_read(&buf_block); 
-            buf_block.block_no = header.block_no[i];
-            device_write(&buf_block);
-        }
-        header.num_blocks=0;
-        write_header();
-    }
-}
-// see `cache.h`.
-static void cache_end_op(OpContext *ctx) {
-    // TODO
-    if (ctx==NULL)return;
-    bool do_commit=FALSE;
-    acquire_spinlock(&log.lock);
-    log.outstanding--;
-    if (log.committing){
-        PANIC();
-    }
-    if (log.outstanding==0){
-        do_commit=TRUE;
-        log.committing=TRUE;
-    }else{
-        post_all_sem(&log.sem);
-    }
-    release_spinlock(&log.lock);
-    if (do_commit){
-        commit();
-        acquire_spinlock(&lock);
-        _for_in_list(node,&head){
-            if (node==&head){
-                continue;
-            }
-            Block *b=container_of(node,Block,node);
-            if (b->pinned){
-                b->pinned=FALSE;
-            }
-
-        }
-        release_spinlock(&lock);
-        acquire_spinlock(&log.lock);
-        log.committing=FALSE;
-        post_all_sem(&log.sem);
-        release_spinlock(&log.lock);
-    }
-}
-
-// see `cache.h`.
-static usize cache_alloc(OpContext *ctx) {
-    // TODO
-    usize bpb=BLOCK_SIZE<<3;
-    for (usize b=0;b<sblock->num_blocks;b+=bpb){
-        usize bmap_block_no=sblock->bitmap_start+(b/bpb);
-        Block *bp=cache_acquire(bmap_block_no);
-        for (usize bi=0;bi<bpb&&b+bi<sblock->num_blocks;bi++){
-            usize mask = 1u<<(bi%8);
-            if ((bp->data[bi/8]&mask)==0){
-                bp->data[bi/8]|=mask;
-                cache_sync(ctx,bp);
-                cache_release(bp);
-                usize allocated_block=b+bi;
-                Block *new_b=cache_acquire(allocated_block);
-                memset(new_b->data,0,BLOCK_SIZE);
-                cache_sync(ctx,new_b);
-                cache_release(new_b);
-                return allocated_block;
-            }
-        }
-        cache_release(bp);
-    }
-    PANIC();
-    return 0;
-}
-
-// see `cache.h`.
-static void cache_free(OpContext *ctx, usize block_no) {
-    // TODO
-    usize bpb=BLOCK_SIZE<<3;
-    usize bmap_block_no=sblock->bitmap_start+(block_no/bpb);
-    usize bi=block_no%bpb;
-    Block *bp=cache_acquire(bmap_block_no);
-    usize mask=1<<(bi%8);
-    if ((bp->data[bi/8]&mask)==0){
-        printk("freeing free block.\n");
-        PANIC();
-    }
-    else{
-        bp->data[bi/8]&=~mask;
-        cache_sync(ctx,bp);
-    }
-    cache_release(bp);
-}
-
-BlockCache bcache = {
-    .get_num_cached_blocks = get_num_cached_blocks,
-    .acquire = cache_acquire,
-    .release = cache_release,
-    .begin_op = cache_begin_op,
-    .sync = cache_sync,
-    .end_op = cache_end_op,
-    .alloc = cache_alloc,
-    .free = cache_free,
-};
-================================================================================
-#inode_test.cpp
-
-extern "C" {
-#include <fs/inode.h>
-}
-
-#include "assert.hpp"
-#include "pause.hpp"
-#include "runner.hpp"
-
-#include "mock/cache.hpp"
-
-void test_init()
-{
-    init_inodes(&sblock, &cache);
-    assert_eq(mock.count_inodes(), 1);
-    assert_eq(mock.count_blocks(), 0);
-}
-
-namespace adhoc
-{
-
-static OpContext _ctx, *ctx = &_ctx;
-
-void test_alloc()
-{
-    mock.begin_op(ctx);
-    usize ino = inodes.alloc(ctx, INODE_REGULAR);
-
-    assert_eq(mock.count_inodes(), 1);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 2);
-
-    auto *p = inodes.get(ino);
-
-    inodes.lock(p);
-    // printf("hello\n");
-    inodes.unlock(p);
-
-    mock.begin_op(ctx);
-    inodes.put(ctx, p);
-
-    assert_eq(mock.count_inodes(), 2);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 1);
-}
-
-void test_sync()
-{
-    auto *p = inodes.get(1);
-
-    inodes.lock(p);
-    assert_eq(p->entry.type, INODE_DIRECTORY);
-    p->entry.major = 0x19;
-    p->entry.minor = 0x26;
-    p->entry.indirect = 0xa817;
-    inodes.unlock(p);
-
-    mock.begin_op(ctx);
-    inodes.lock(p);
-    inodes.sync(ctx, p, true);
-    inodes.unlock(p);
-    inodes.put(ctx, p);
-    mock.end_op(ctx);
-
-    auto *q = mock.inspect(1);
-    assert_eq(q->type, INODE_DIRECTORY);
-    assert_eq(q->major, 0x19);
-    assert_eq(q->minor, 0x26);
-    assert_eq(q->indirect, 0xa817);
-}
-
-void test_touch()
-{
-    auto *p = inodes.get(1);
-    inodes.lock(p);
-
-    for (usize i = 2; i < mock.num_inodes; i++) {
-        mock.begin_op(ctx);
-        usize ino = inodes.alloc(ctx, INODE_REGULAR);
-        inodes.insert(ctx, p, std::to_string(i).data(), ino);
-
-        auto *q = inodes.get(ino);
-        inodes.lock(q);
-        assert_eq(q->entry.type, INODE_REGULAR);
-        assert_eq(q->entry.major, 0);
-        assert_eq(q->entry.minor, 0);
-        assert_eq(q->entry.num_links, 0);
-        assert_eq(q->entry.num_bytes, 0);
-        assert_eq(q->entry.indirect, 0);
-        for (usize j = 0; j < INODE_NUM_DIRECT; j++) {
-            assert_eq(q->entry.addrs[j], 0);
-        }
-
-        q->entry.num_links++;
-
-        inodes.sync(ctx, q, true);
-
-        inodes.unlock(q);
-        inodes.put(ctx, q);
-
-        assert_eq(mock.count_inodes(), i - 1);
-        mock.end_op(ctx);
-        assert_eq(mock.count_inodes(), i);
-    }
-
-    usize n = mock.num_inodes - 1;
-    for (usize i = 2; i < mock.num_inodes; i += 2, n--) {
-        mock.begin_op(ctx);
-        usize index = 10086;
-        assert_ne(inodes.lookup(p, std::to_string(i).data(), &index), 0);
-        assert_ne(index, 10086);
-        inodes.remove(ctx, p, index);
-
-        auto *q = inodes.get(i);
-        inodes.lock(q);
-        q->entry.num_links = 0;
-        inodes.sync(ctx, q, true);
-        inodes.unlock(q);
-        inodes.put(ctx, q);
-
-        assert_eq(mock.count_inodes(), n);
-        mock.end_op(ctx);
-        assert_eq(mock.count_inodes(), n - 1);
-    }
-
-    mock.begin_op(ctx);
-    usize ino = inodes.alloc(ctx, INODE_DIRECTORY);
-    auto *q = inodes.get(ino);
-    inodes.lock(q);
-    assert_eq(q->entry.type, INODE_DIRECTORY);
-    inodes.unlock(q);
-    assert_eq(mock.count_inodes(), n);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), n + 1);
-
-    mock.begin_op(ctx);
-    inodes.put(ctx, q);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), n);
-
-    for (usize i = 3; i < mock.num_inodes; i += 2, n--) {
-        mock.begin_op(ctx);
-        q = inodes.get(i);
-        inodes.lock(q);
-        q->entry.num_links = 0;
-        inodes.sync(ctx, q, true);
-        inodes.unlock(q);
-        inodes.put(ctx, q);
-        assert_eq(mock.count_inodes(), n);
-        mock.end_op(ctx);
-        assert_eq(mock.count_inodes(), n - 1);
-    }
-
-    inodes.unlock(p);
-}
-
-void test_share()
-{
-    mock.begin_op(ctx);
-    usize ino = inodes.alloc(ctx, INODE_REGULAR);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 2);
-
-    auto *p = inodes.get(ino);
-    auto *q = inodes.share(p);
-    auto *r = inodes.get(ino);
-
-    assert_eq(r->rc.count, 3);
-
-    mock.begin_op(ctx);
-    inodes.put(ctx, p);
-    assert_eq(q->rc.count, 2);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 2);
-
-    mock.begin_op(ctx);
-    inodes.put(ctx, q);
-    assert_eq(r->rc.count, 1);
-    assert_eq(mock.count_inodes(), 2);
-    inodes.put(ctx, r);
-    assert_eq(mock.count_inodes(), 2);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 1);
-}
-
-void test_small_file()
-{
-    mock.begin_op(ctx);
-    usize ino = inodes.alloc(ctx, INODE_REGULAR);
-    mock.end_op(ctx);
-
-    u8 buf[1];
-    auto *p = inodes.get(ino);
-    inodes.lock(p);
-
-    buf[0] = 0xcc;
-    inodes.read(p, buf, 0, 0);
-    assert_eq(buf[0], 0xcc);
-
-    mock.begin_op(ctx);
-    inodes.write(ctx, p, buf, 0, 1);
-    assert_eq(mock.count_blocks(), 0);
-    mock.end_op(ctx);
-
-    auto *q = mock.inspect(ino);
-    assert_eq(q->indirect, 0);
-    assert_ne(q->addrs[0], 0);
-    assert_eq(q->addrs[1], 0);
-    assert_eq(q->num_bytes, 1);
-    assert_eq(mock.count_blocks(), 1);
-
-    mock.fill_junk();
-    buf[0] = 0;
-    inodes.read(p, buf, 0, 1);
-    assert_eq(buf[0], 0xcc);
-
-    inodes.unlock(p);
-
-    inodes.lock(p);
-
-    mock.begin_op(ctx);
-    inodes.clear(ctx, p);
-    mock.end_op(ctx);
-
-    q = mock.inspect(ino);
-    assert_eq(q->indirect, 0);
-    assert_eq(q->addrs[0], 0);
-    assert_eq(q->num_bytes, 0);
-    assert_eq(mock.count_blocks(), 0);
-
-    inodes.unlock(p);
-
-    mock.begin_op(ctx);
-    inodes.put(ctx, p);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 1);
-}
-
-void test_large_file()
-{
-    mock.begin_op(ctx);
-    usize ino = inodes.alloc(ctx, INODE_REGULAR);
-    mock.end_op(ctx);
-
-    constexpr usize max_size = 65535;
-    u8 buf[max_size], copy[max_size];
-    std::mt19937 gen(0x12345678);
-    for (usize i = 0; i < max_size; i++) {
-        copy[i] = buf[i] = gen() & 0xff;
-    }
-
-    auto *p = inodes.get(ino);
-
-    inodes.lock(p);
-    for (usize i = 0, n = 0; i < max_size; i += n) {
-        n = std::min(static_cast<usize>(gen() % 10000), max_size - i);
-
-        mock.begin_op(ctx);
-        inodes.write(ctx, p, buf + i, i, n);
-        auto *q = mock.inspect(ino);
-        assert_eq(q->num_bytes, i);
-        mock.end_op(ctx);
-        assert_eq(q->num_bytes, i + n);
-    }
-    inodes.unlock(p);
-
-    for (usize i = 0; i < max_size; i++) {
-        buf[i] = 0;
-    }
-
-    inodes.lock(p);
-    inodes.read(p, buf, 0, max_size);
-    inodes.unlock(p);
-
-    for (usize i = 0; i < max_size; i++) {
-        assert_eq(buf[i], copy[i]);
-    }
-
-    inodes.lock(p);
-    mock.begin_op(ctx);
-    inodes.clear(ctx, p);
-    inodes.unlock(p);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 2);
-    assert_eq(mock.count_blocks(), 0);
-
-    for (usize i = 0; i < max_size; i++) {
-        copy[i] = buf[i] = gen() & 0xff;
-    }
-
-    inodes.lock(p);
-    mock.begin_op(ctx);
-    inodes.write(ctx, p, buf, 0, max_size);
-    mock.end_op(ctx);
-    inodes.unlock(p);
-
-    auto *q = mock.inspect(ino);
-    assert_eq(q->num_bytes, max_size);
-
-    for (usize i = 0; i < max_size; i++) {
-        buf[i] = 0;
-    }
-
-    inodes.lock(p);
-    for (usize i = 0, n = 0; i < max_size; i += n) {
-        n = std::min(static_cast<usize>(gen() % 10000), max_size - i);
-        inodes.read(p, buf + i, i, n);
-        for (usize j = 0; j < i + n; j++) {
-            assert_eq(buf[j], copy[j]);
-        }
-    }
-    inodes.unlock(p);
-
-    mock.begin_op(ctx);
-    inodes.put(ctx, p);
-    mock.end_op(ctx);
-
-    assert_eq(mock.count_inodes(), 1);
-    assert_eq(mock.count_blocks(), 0);
-}
-
-void test_dir()
-{
-    usize ino[5] = { 1 };
-
-    mock.begin_op(ctx);
-    ino[1] = inodes.alloc(ctx, INODE_DIRECTORY);
-    ino[2] = inodes.alloc(ctx, INODE_REGULAR);
-    ino[3] = inodes.alloc(ctx, INODE_REGULAR);
-    ino[4] = inodes.alloc(ctx, INODE_REGULAR);
-    assert_eq(mock.count_inodes(), 1);
-    mock.end_op(ctx);
-    assert_eq(mock.count_inodes(), 5);
-
-    Inode *p[5];
-    for (usize i = 0; i < 5; i++) {
-        p[i] = inodes.get(ino[i]);
-        inodes.lock(p[i]);
-    }
-
-    mock.begin_op(ctx);
-    inodes.insert(ctx, p[0], "fudan", ino[1]);
-    p[1]->entry.num_links++;
-    inodes.sync(ctx, p[1], true);
-
-    auto *q = mock.inspect(ino[0]);
-    assert_eq(q->addrs[0], 0);
-    assert_eq(inodes.lookup(p[0], "fudan", NULL), ino[1]);
-    mock.end_op(ctx);
-
-    assert_eq(inodes.lookup(p[0], "fudan", NULL), ino[1]);
-    assert_eq(inodes.lookup(p[0], "sjtu", NULL), 0);
-    assert_eq(inodes.lookup(p[0], "pku", NULL), 0);
-    assert_eq(inodes.lookup(p[0], "tsinghua", NULL), 0);
-
-    mock.begin_op(ctx);
-    inodes.insert(ctx, p[0], ".vimrc", ino[2]);
-    inodes.insert(ctx, p[1], "alice", ino[3]);
-    inodes.insert(ctx, p[1], "bob", ino[4]);
-    p[2]->entry.num_links++;
-    p[3]->entry.num_links++;
-    p[4]->entry.num_links++;
-    inodes.sync(ctx, p[2], true);
-    inodes.sync(ctx, p[3], true);
-    inodes.sync(ctx, p[4], true);
-    mock.end_op(ctx);
-
-    for (usize i = 1; i < 5; i++) {
-        q = mock.inspect(ino[i]);
-        assert_eq(q->num_links, 1);
-    }
-
-    usize index = 233;
-    assert_eq(inodes.lookup(p[0], "vimrc", &index), 0);
-    assert_eq(index, 233);
-    assert_eq(inodes.lookup(p[0], ".vimrc", &index), ino[2]);
-    assert_ne(index, 233);
-    index = 244;
-    assert_eq(inodes.lookup(p[1], "nano", &index), 0);
-    assert_eq(index, 244);
-    assert_eq(inodes.lookup(p[1], "alice", &index), ino[3]);
-    usize index2 = 255;
-    assert_eq(inodes.lookup(p[1], "bob", &index2), ino[4]);
-    assert_ne(index, 244);
-    assert_ne(index2, 255);
-    assert_ne(index, index2);
-
-    mock.begin_op(ctx);
-    inodes.clear(ctx, p[1]);
-    p[2]->entry.num_links = 0;
-    inodes.sync(ctx, p[2], true);
-
-    q = mock.inspect(ino[1]);
-    assert_ne(q->addrs[0], 0);
-    assert_eq(inodes.lookup(p[1], "alice", NULL), 0);
-    assert_eq(inodes.lookup(p[1], "bob", NULL), 0);
-    mock.end_op(ctx);
-
-    assert_eq(q->addrs[0], 0);
-    assert_eq(mock.count_inodes(), 5);
-    assert_ne(mock.count_blocks(), 0);
-
-    for (usize i = 0; i < 5; i++) {
-        mock.begin_op(ctx);
-        inodes.unlock(p[i]);
-        inodes.put(ctx, p[i]);
-        mock.end_op(ctx);
-        assert_eq(mock.count_inodes(), (i < 2 ? 5 : 4));
-    }
-}
-
-} // namespace adhoc
-
-int main()
-{
-    if (Runner::run({ "init", test_init }))
-        init_inodes(&sblock, &cache);
-    else
-        return -1;
-
-    std::vector<Testcase> tests = {
-        { "alloc", adhoc::test_alloc },
-        { "sync", adhoc::test_sync },
-        { "touch", adhoc::test_touch },
-        { "share", adhoc::test_share },
-        { "small_file", adhoc::test_small_file },
-        { "large_file", adhoc::test_large_file },
-        { "dir", adhoc::test_dir },
-    };
-    Runner(tests).run();
-
-    return 0;
-}
-
+# src/fs/file.h
+
+     1  | #pragma once
+     2  | 
+     3  | #include <common/defines.h>
+     4  | #include <common/sem.h>
+     5  | #include <fs/defines.h>
+     6  | #include <fs/fs.h>
+     7  | #include <fs/inode.h>
+     8  | #include <sys/stat.h>
+     9  | #include <common/list.h>
+    10  | 
+    11  | // 整个系统中最大打开文件数量。
+    12  | #define NFILE 65536  
+    13  | 
+    14  | typedef struct file {
+    15  |     // 文件类型。
+    16  |     // 注意：设备文件的类型也会是 FD_INODE。
+    17  |     enum { FD_NONE, FD_PIPE, FD_INODE } type;
+    18  |     // 引用计数。
+    19  |     int ref;
+    20  |     // 文件是否可读或可写。
+    21  |     bool readable, writable;
+    22  |     // 文件对应的底层对象。
+    23  |     union {
+    24  |         struct pipe* pipe;
+    25  |         Inode* ip;
+    26  |     };
+    27  |     // 文件的字节偏移量。
+    28  |     // 对于管道而言，该值表示已写入/读取的字节数。
+    29  |     usize off;
+    30  | } File;
+    31  | 
+    32  | struct ftable {
+    33  |     // TODO: 系统中的文件对象表
+    34  | 
+    35  |     // 注意：你可能需要一个锁来防止对该表的并发访问！
+    36  | };
+    37  | 
+    38  | struct oftable {
+    39  |     // TODO: 进程中已打开的文件描述符表
+    40  | };
+    41  | 
+    42  | // 初始化全局文件表。
+    43  | void init_ftable();
+    44  | // 初始化进程的已打开文件表。
+    45  | void init_oftable(struct oftable*);
+    46  | 
+    47  | /**
+    48  |     @brief 在全局文件表中查找一个未使用的文件（即 ref == 0）并将其引用计数设为 1。
+    49  |     
+    50  |     @return struct file* 找到的文件对象。
+    51  |  */
+    52  | struct file* file_alloc();
+    53  | 
+    54  | /**
+    55  |     @brief 通过增加引用计数来复制一个文件对象。
+    56  |     
+    57  |     @return struct file* 同一个文件对象。
+    58  | 
+    59  |     @see `inode_share` 函数为索引节点（inode）执行类似的操作。
+    60  |  */
+    61  | struct file* file_dup(struct file* f);
+    62  | 
+    63  | /**
+    64  |     @brief 减少文件对象的引用计数。
+    65  | 
+    66  |     如果 f->ref == 0，则真正关闭该文件并释放索引节点（或关闭管道）。
+    67  | 
+    68  |     @note 由于 `cache.end_op` 可能会导致休眠，因此在调用 `end_op` 时，
+    69  |     你不应该持有任何锁（指的是 `ftable` 的锁）！在释放索引节点之前，请先释放锁。
+    70  | 
+    71  |     @see `inode_put` 函数为索引节点（inode）执行类似的操作。
+    72  |  */
+    73  | void file_close(struct file* f);
+    74  | 
+    75  | /**
+    76  |     @brief 读取文件的元数据。
+    77  | 
+    78  |     你无需自行完整实现此方法。只需调用 `stati` 函数即可。
+    79  |     
+    80  |     @param[out] st 待填充的 stat 结构体。
+    81  |     @return int 成功返回 0，失败返回 -1。
+    82  | 
+    83  |     @see `stati` 函数会为索引节点填充 `st` 结构体。
+    84  |  */
+    85  | int file_stat(struct file* f, struct stat* st);
+    86  | 
+    87  | /**
+    88  |     @brief 读取文件 `f` 中范围为 [f->off, f->off + n) 的内容。
+    89  | 
+    90  |     
+    91  |     @param[out] addr 待填充的缓冲区。
+    92  |     @param n 要读取的字节数。
+    93  |     @return isize 实际读取的字节数。出错时返回 -1。
+    94  |  */
+    95  | isize file_read(struct file* f, char* addr, isize n);
+    96  | 
+    97  | /**
+    98  |     @brief 向文件 `f` 中范围为 [f->off, f->off + n) 的位置写入内容。
+    99  | 
+   100  |     @param addr 待写入的缓冲区。
+   101  |     @param n 要写入的字节数。
+   102  |     @return isize 实际写入的字节数。出错时返回 -1。
+   103  | */
+   104  | isize file_write(struct file* f, char* addr, isize n);
 ================================================================================
