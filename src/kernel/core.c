@@ -41,7 +41,7 @@ NO_RETURN void kernel_entry()
     // printk("kernel_entry: started on CPU %lld\n", cpuid());
     // extern void init_filesystem();
     // printk("kernel_entry: calling init_filesystem\n");
-    // init_filesystem();
+    init_filesystem();
     // printk("kernel_entry: init_filesystem done\n");
     
     // printk("Hello world! (Core %lld)\n", cpuid());

@@ -60,7 +60,7 @@ static void free_desc(struct virtq *virtq, u16 n)
 int virtio_blk_rw(Buf *b)
 {
     enum diskop op = DREAD;
-    printk("63\n");
+    // printk("63\n");
     // 脏数据，需要写入
     if (b->flags & B_DIRTY)
         op = DWRITE;
@@ -79,9 +79,9 @@ int virtio_blk_rw(Buf *b)
         return -1;
     hdr.reserved = 0;
     hdr.sector = sector;
-    printk("82\n");
+    // printk("82\n");
     acquire_spinlock(&disk.lk);
-    printk("84\n");
+    // printk("84\n");
     // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
     int d0 = alloc_desc(&disk.virtq);
     if (d0 < 0)
@@ -118,12 +118,12 @@ int virtio_blk_rw(Buf *b)
     arch_fence();
     REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
     arch_fence();
-    printk("virtio_blk_rw: request submitted, waiting for completion\n");
+    // printk("virtio_blk_rw: request submitted, waiting for completion\n");
     /* LAB 4 TODO 1 BEGIN */
     release_spinlock(&disk.lk);
-    printk("virtio_bk.c:122\n");
+    // printk("virtio_bk.c:122\n");
     unalertable_wait_sem(&b->sem);
-    printk("virtio_bk.c:124\n");
+    // printk("virtio_bk.c:124\n");
     acquire_spinlock(&disk.lk);
     /* LAB 4 TODO 1 END */
 
