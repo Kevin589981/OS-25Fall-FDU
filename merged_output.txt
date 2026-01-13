@@ -1,175 +1,579 @@
-# src/fs/file.c
-
-     1  | #include "file.h"
-     2  | #include <common/defines.h>
-     3  | #include <common/spinlock.h>
-     4  | #include <common/sem.h>
-     5  | #include <fs/inode.h>
-     6  | #include <common/list.h>
-     7  | #include <kernel/mem.h>
-     8  | 
-     9  | // the global file table.
-    10  | static struct ftable ftable;
-    11  | 
-    12  | void init_ftable() {
-    13  |     // TODO: initialize your ftable.
-    14  | }
-    15  | 
-    16  | void init_oftable(struct oftable *oftable) {
-    17  |     // TODO: initialize your oftable for a new process.
-    18  | }
-    19  | 
-    20  | /* Allocate a file structure. */
-    21  | struct file* file_alloc() {
-    22  |     /* (Final) TODO BEGIN */
-    23  |     
-    24  |     /* (Final) TODO END */
-    25  |     return 0;
-    26  | }
-    27  | 
-    28  | /* Increment ref count for file f. */
-    29  | struct file* file_dup(struct file* f) {
-    30  |     /* (Final) TODO BEGIN */
-    31  |     
-    32  |     /* (Final) TODO END */
-    33  |     return f;
-    34  | }
-    35  | 
-    36  | /* Close file f. (Decrement ref count, close when reaches 0.) */
-    37  | void file_close(struct file* f) {
-    38  |     /* (Final) TODO BEGIN */
-    39  |     
-    40  |     /* (Final) TODO END */
-    41  | }
-    42  | 
-    43  | /* Get metadata about file f. */
-    44  | int file_stat(struct file* f, struct stat* st) {
-    45  |     /* (Final) TODO BEGIN */
-    46  |     
-    47  |     /* (Final) TODO END */
-    48  |     return -1;
-    49  | }
-    50  | 
-    51  | /* Read from file f. */
-    52  | isize file_read(struct file* f, char* addr, isize n) {
-    53  |     /* (Final) TODO BEGIN */
-    54  |     
-    55  |     /* (Final) TODO END */
-    56  |     return 0;
-    57  | }
-    58  | 
-    59  | /* Write to file f. */
-    60  | isize file_write(struct file* f, char* addr, isize n) {
-    61  |     /* (Final) TODO BEGIN */
-    62  |     
-    63  |     /* (Final) TODO END */
-    64  |     return 0;
-    65  | }
-================================================================================
-# src/fs/file.h
+# src/kernel/proc.h
 
      1  | #pragma once
      2  | 
      3  | #include <common/defines.h>
-     4  | #include <common/sem.h>
-     5  | #include <fs/defines.h>
-     6  | #include <fs/fs.h>
-     7  | #include <fs/inode.h>
-     8  | #include <sys/stat.h>
-     9  | #include <common/list.h>
+     4  | #include <common/list.h>
+     5  | #include <common/sem.h>
+     6  | #include <common/rbtree.h>
+     7  | #include <kernel/pt.h>
+     8  | #include <fs/file.h>
+     9  | #include <fs/inode.h>
     10  | 
-    11  | // 整个系统中最大打开文件数量。
-    12  | #define NFILE 65536  
-    13  | 
-    14  | typedef struct file {
-    15  |     // 文件类型。
-    16  |     // 注意：设备文件的类型也会是 FD_INODE。
-    17  |     enum { FD_NONE, FD_PIPE, FD_INODE } type;
-    18  |     // 引用计数。
-    19  |     int ref;
-    20  |     // 文件是否可读或可写。
-    21  |     bool readable, writable;
-    22  |     // 文件对应的底层对象。
-    23  |     union {
-    24  |         struct pipe* pipe;
-    25  |         Inode* ip;
-    26  |     };
-    27  |     // 文件的字节偏移量。
-    28  |     // 对于管道而言，该值表示已写入/读取的字节数。
-    29  |     usize off;
-    30  | } File;
+    11  | enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, DEEPSLEEPING, ZOMBIE };
+    12  | 
+    13  | typedef struct UserContext {
+    14  |     u64 sp, useless;
+    15  |     u64 spsr, elr;
+    16  |     u64 x[18];
+    17  | } UserContext;
+    18  | 
+    19  | typedef struct KernelContext {
+    20  |     u64 lr, x0, x1;
+    21  |     u64 x[11];
+    22  | } KernelContext;
+    23  | 
+    24  | // embeded data for procs
+    25  | struct schinfo {
+    26  |     u64 vruntime;
+    27  |     struct rb_node_ node;  // 改为红黑树节点
+    28  |     int nice;              // -20 到 19
+    29  |     u64 start_exec_time;
+    30  | };
     31  | 
-    32  | struct ftable {
-    33  |     // TODO: 系统中的文件对象表
-    34  | 
-    35  |     // 注意：你可能需要一个锁来防止对该表的并发访问！
-    36  | };
-    37  | 
-    38  | struct oftable {
-    39  |     // TODO: 进程中已打开的文件描述符表
-    40  | };
-    41  | 
-    42  | // 初始化全局文件表。
-    43  | void init_ftable();
-    44  | // 初始化进程的已打开文件表。
-    45  | void init_oftable(struct oftable*);
-    46  | 
-    47  | /**
-    48  |     @brief 在全局文件表中查找一个未使用的文件（即 ref == 0）并将其引用计数设为 1。
-    49  |     
-    50  |     @return struct file* 找到的文件对象。
-    51  |  */
-    52  | struct file* file_alloc();
-    53  | 
-    54  | /**
-    55  |     @brief 通过增加引用计数来复制一个文件对象。
-    56  |     
-    57  |     @return struct file* 同一个文件对象。
-    58  | 
-    59  |     @see `inode_share` 函数为索引节点（inode）执行类似的操作。
-    60  |  */
-    61  | struct file* file_dup(struct file* f);
-    62  | 
-    63  | /**
-    64  |     @brief 减少文件对象的引用计数。
+    32  | extern int prio_to_weight[];
+    33  | #define WEIGHT(priority) prio_to_weight[priority+20]
+    34  | #define NICE_0_LOAD 1024
+    35  | 
+    36  | typedef struct Proc {
+    37  |     bool killed;
+    38  |     bool idle;
+    39  |     int pid;
+    40  |     int exitcode;
+    41  |     enum procstate state;
+    42  |     Semaphore childexit;
+    43  |     ListNode children;
+    44  |     ListNode ptnode;
+    45  |     struct Proc *parent;
+    46  |     struct schinfo schinfo;
+    47  |     struct pgdir pgdir;
+    48  |     void *kstack;
+    49  |     UserContext *ucontext;
+    50  |     KernelContext *kcontext;
+    51  |     struct oftable oftable;
+    52  |     Inode *cwd;
+    53  |     SpinLock lock;
+    54  | } Proc;
+    55  | 
+    56  | void init_kproc();
+    57  | void init_proc(Proc *);
+    58  | WARN_RESULT Proc *create_proc();
+    59  | int start_proc(Proc *, void (*entry)(u64), u64 arg);
+    60  | NO_RETURN void exit(int code);
+    61  | WARN_RESULT int wait(int *exitcode);
+    62  | WARN_RESULT int kill(int pid);
+    63  | WARN_RESULT int fork();
+    64  | 
     65  | 
-    66  |     如果 f->ref == 0，则真正关闭该文件并释放索引节点（或关闭管道）。
-    67  | 
-    68  |     @note 由于 `cache.end_op` 可能会导致休眠，因此在调用 `end_op` 时，
-    69  |     你不应该持有任何锁（指的是 `ftable` 的锁）！在释放索引节点之前，请先释放锁。
-    70  | 
-    71  |     @see `inode_put` 函数为索引节点（inode）执行类似的操作。
-    72  |  */
-    73  | void file_close(struct file* f);
-    74  | 
-    75  | /**
-    76  |     @brief 读取文件的元数据。
-    77  | 
-    78  |     你无需自行完整实现此方法。只需调用 `stati` 函数即可。
-    79  |     
-    80  |     @param[out] st 待填充的 stat 结构体。
-    81  |     @return int 成功返回 0，失败返回 -1。
-    82  | 
-    83  |     @see `stati` 函数会为索引节点填充 `st` 结构体。
-    84  |  */
-    85  | int file_stat(struct file* f, struct stat* st);
-    86  | 
-    87  | /**
-    88  |     @brief 读取文件 `f` 中范围为 [f->off, f->off + n) 的内容。
-    89  | 
-    90  |     
-    91  |     @param[out] addr 待填充的缓冲区。
-    92  |     @param n 要读取的字节数。
-    93  |     @return isize 实际读取的字节数。出错时返回 -1。
-    94  |  */
-    95  | isize file_read(struct file* f, char* addr, isize n);
-    96  | 
-    97  | /**
-    98  |     @brief 向文件 `f` 中范围为 [f->off, f->off + n) 的位置写入内容。
-    99  | 
-   100  |     @param addr 待写入的缓冲区。
-   101  |     @param n 要写入的字节数。
-   102  |     @return isize 实际写入的字节数。出错时返回 -1。
-   103  | */
-   104  | isize file_write(struct file* f, char* addr, isize n);
+    66  | #define MAX_PID 4096 // 定义系统支持的最大PID数量，可以根据需求调整
+    67  | #define BITS_PER_LONG (sizeof(unsigned long) * 8)
+    68  | #define BITMAP_SIZE (MAX_PID / BITS_PER_LONG)
+    69  | 
+    70  | // 全局PID位图
+    71  | extern unsigned long pid_bitmap[BITMAP_SIZE];
+================================================================================
+# src/kernel/proc.c
+
+     1  | #include <kernel/proc.h>
+     2  | #include <kernel/mem.h>
+     3  | #include <kernel/sched.h>
+     4  | #include <aarch64/mmu.h>
+     5  | #include <common/list.h>
+     6  | #include <common/string.h>
+     7  | #include <kernel/printk.h>
+     8  | #include <kernel/debug.h>
+     9  | #include <kernel/core.h>
+    10  | #include <kernel/cpu.h>
+    11  | #ifndef NCPU
+    12  | #define NCPU 4
+    13  | #endif
+    14  | #include <kernel/paging.h>
+    15  | 
+    16  | Proc root_proc;
+    17  | 
+    18  | void kernel_entry();
+    19  | u64 proc_entry();
+    20  | 
+    21  | SpinLock global_process_lock;
+    22  | int prio_to_weight[40]={
+    23  |     /* -20 */     88761,     71755,     56483,     46273,     36291,
+    24  |     /* -15 */     29154,     23254,     18705,     14949,     11916,
+    25  |     /* -10 */      9548,      7620,      6100,      4904,      3906,
+    26  |     /*  -5 */      3121,      2501,      1991,      1586,      1277,
+    27  |     /*   0 */      1024,       820,       655,       526,       423,
+    28  |     /*   5 */       335,       272,       215,       172,       137,
+    29  |     /*  10 */       110,        87,        70,        56,        45,
+    30  |     /*  15 */        36,        29,        23,        18,        15,
+    31  | }; 
+    32  | // unsigned long pid_bitmap[BITMAP_SIZE];
+    33  | 
+    34  | // // 用于记录下一次开始搜索空闲PID的位置，以提高效率
+    35  | // static int next_pid_to_check = 0;
+    36  | 
+    37  | // // 初始化PID分配器
+    38  | // void init_pid_allocator() {
+    39  | //     // 初始化位图，将所有位清零，表示所有PID都未被分配
+    40  | //     memset(pid_bitmap, 0, sizeof(pid_bitmap));
+    41  | //     next_pid_to_check = 0;
+    42  | //     // 保留PID 0
+    43  | //     // set_bit(0, pid_bitmap);
+    44  | // }
+    45  | 
+    46  | // // 回收一个PID
+    47  | // void pid_recycler(int pid) {
+    48  | //     if (pid < 0 || pid >= MAX_PID) {
+    49  | //         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
+    50  | //         return;
+    51  | //     }
+    52  | 
+    53  | // #ifdef PID_DEBUG
+    54  | //     printk("Recycling PID: %d\n", pid);
+    55  | // #endif
+    56  | 
+    57  | //     // 使用原子操作或在锁保护下清除对应位
+    58  | //     // 这里我们假设它会在 global_process_lock 的保护下被调用
+    59  | //     int index = pid / BITS_PER_LONG;
+    60  | //     int offset = pid % BITS_PER_LONG;
+    61  | //     pid_bitmap[index] &= ~(1UL << offset);
+    62  | // }
+    63  | 
+    64  | // // 分配一个PID
+    65  | // int pid_allocator() {
+    66  | //     // 假设此函数总是在 global_process_lock 保护下调用
+    67  |     
+    68  | //     // 从上次检查的位置开始循环查找
+    69  | //     for (int i = 0; i < MAX_PID; ++i) {
+    70  | //         int pid = (next_pid_to_check + i) % MAX_PID;
+    71  | //         if (pid == 0) continue; // 跳过PID 0
+    72  | 
+    73  | //         int index = pid / BITS_PER_LONG;
+    74  | //         int offset = pid % BITS_PER_LONG;
+    75  | 
+    76  | //         // 检查该位是否为0 (未被占用)
+    77  | //         if (!(pid_bitmap[index] & (1UL << offset))) {
+    78  | //             // 标记该位为1 (已占用)
+    79  | //             pid_bitmap[index] |= (1UL << offset);
+    80  |             
+    81  | //             // 更新下一次开始搜索的位置
+    82  | //             next_pid_to_check = pid + 1;
+    83  | //             if (next_pid_to_check >= MAX_PID) {
+    84  | //                 next_pid_to_check = 1; // 回到开头
+    85  | //             }
+    86  |             
+    87  | //             return pid;
+    88  | //         }
+    89  | //     }
+    90  | 
+    91  | //     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
+    92  | //     return -1; // 返回错误码
+    93  | // }
+    94  | unsigned long pid_bitmap[BITMAP_SIZE];
+    95  | 
+    96  | // 用于记录下一次开始搜索空闲PID的位置，以提高效率
+    97  | static int next_pid_to_check = 1;
+    98  | 
+    99  | // 初始化PID分配器
+   100  | void init_pid_allocator() {
+   101  |     // 初始化位图，将所有位清零，表示所有PID都未被分配
+   102  |     memset(pid_bitmap, 0, sizeof(pid_bitmap));
+   103  |     next_pid_to_check = 1;
+   104  |     pid_bitmap[0] |= 1UL; 
+   105  | }
+   106  | 
+   107  | // 回收一个PID (此函数已是O(1)，无需修改)
+   108  | void pid_recycler(int pid) {
+   109  |     if (pid <= 0 || pid >= MAX_PID) {
+   110  |         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
+   111  |         return;
+   112  |     }
+   113  | 
+   114  | #ifdef PID_DEBUG
+   115  |     printk("Recycling PID: %d\n", pid);
+   116  | #endif
+   117  | 
+   118  |     int index = pid / BITS_PER_LONG;
+   119  |     int offset = pid % BITS_PER_LONG;
+   120  |     pid_bitmap[index] &= ~(1UL << offset);
+   121  | }
+   122  | 
+   123  | //==============================================================================
+   124  | //           分配一个PID (使用 AArch64 内联汇编优化)
+   125  | //==============================================================================
+   126  | int pid_allocator() {
+   127  |     // 假设此函数总是在锁保护下调用
+   128  | 
+   129  |     // 从上次检查的字开始，遍历整个位图
+   130  |     usize start_index = (next_pid_to_check / BITS_PER_LONG) % BITMAP_SIZE;
+   131  | 
+   132  |     for (usize i = 0; i < BITMAP_SIZE; ++i) {
+   133  |         int index = (start_index + i) % BITMAP_SIZE;
+   134  |         unsigned long word = pid_bitmap[index];
+   135  | 
+   136  |         // 优化: 如果这个字的所有位都已设置 (全满)，则快速跳过。
+   137  |         if (word == ~0UL) {
+   138  |             continue;
+   139  |         }
+   140  | 
+   141  |         // 找到了一个不满的字，现在使用硬件指令来快速找到第一个0位。
+   142  |         unsigned long inverted_word = ~word;
+   143  |         unsigned long offset;
+   144  | 
+   145  |         // 使用AArch64内联汇编计算尾随零的数量(Count Trailing Zeros)
+   146  |         // 相当于找到 inverted_word 中第一个为1的位的索引
+   147  |         asm volatile (
+   148  |             "rbit %0, %1\n\t"  // 1. 将位的顺序颠倒
+   149  |             "clz  %0, %0\n\t"  // 2. 计算颠倒后数字的前导零数量
+   150  |             : "=r" (offset)    // 输出: offset ('='表示写入, 'r'表示通用寄存器)
+   151  |             : "r" (inverted_word) // 输入: inverted_word ('r'表示通用寄存器)
+   152  |         );
+   153  | 
+   154  |         // 计算最终的PID
+   155  |         int pid = index * BITS_PER_LONG + offset;
+   156  | 
+   157  |         // 边界检查: 确保计算出的PID没有超过最大限制
+   158  |         // 这在最后一个字不是完整填充的情况下很重要
+   159  |         if (pid >= MAX_PID) {
+   160  |             continue; // 继续搜索下一个可能的字
+   161  |         }
+   162  |         
+   163  |         // 找到了一个有效的、空闲的PID
+   164  | 
+   165  |         // 标记该位为1 (已占用)
+   166  |         pid_bitmap[index] |= (1UL << offset);
+   167  | 
+   168  |         // 更新下一次开始搜索的位置，以实现轮转效果
+   169  |         next_pid_to_check = pid + 1;
+   170  |         if (next_pid_to_check >= MAX_PID) {
+   171  |             next_pid_to_check = 1; // 回到开头 (跳过PID 0)
+   172  |         }
+   173  | 
+   174  |         return pid;
+   175  |     }
+   176  | 
+   177  |     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
+   178  |     return -1; // 返回错误码
+   179  | }
+   180  | 
+   181  | 
+   182  | 
+   183  | 
+   184  | Proc idle_procs[NCPU];
+   185  | 
+   186  | void init_kproc()
+   187  | {
+   188  |     init_spinlock(&global_process_lock);
+   189  |     init_pid_allocator();
+   190  |     
+   191  |     // 2. init the root_proc (finished)
+   192  | 
+   193  |     init_proc(&root_proc);
+   194  |     root_proc.parent = &root_proc;
+   195  |     start_proc(&root_proc, kernel_entry, 123456);
+   196  | }
+   197  | 
+   198  | void init_proc(Proc *p)
+   199  | {   
+   200  |     acquire_spinlock(&global_process_lock);
+   201  |     memset(p, 0, sizeof(Proc));
+   202  | 
+   203  |     init_sem(&p->childexit, 1);
+   204  |     init_list_node(&p->children);
+   205  |     init_list_node(&p->ptnode);
+   206  |     p->idle = FALSE;
+   207  |     p->exitcode = 0;
+   208  |     p->killed = FALSE;
+   209  |     p->parent = NULL;
+   210  |     p->pid = pid_allocator();
+   211  |     if (p->pid==-1){
+   212  |         kfree(p);
+   213  |         release_spinlock(&global_process_lock);
+   214  |         printk("PID used out\n");
+   215  |         PANIC();
+   216  |     }
+   217  |     init_pgdir(&p->pgdir);
+   218  |     p->state = UNUSED;
+   219  |     p->kstack = kalloc_page();
+   220  |     init_spinlock(&p->lock);
+   221  |     init_schinfo(&p->schinfo);
+   222  |     
+   223  |     if (p->kstack == NULL) {
+   224  |         PANIC();
+   225  |     }
+   226  |     memset(p->kstack, 0, PAGE_SIZE);
+   227  |     p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext));
+   228  |     p->kcontext = (KernelContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext)- sizeof(KernelContext));
+   229  |     
+   230  | 
+   231  |     release_spinlock(&global_process_lock);
+   232  | }
+   233  | 
+   234  | Proc *create_proc()
+   235  | {
+   236  |     Proc *p = kalloc(sizeof(Proc));
+   237  |     if (p==NULL){
+   238  |         PANIC();
+   239  |     }
+   240  |     init_proc(p);
+   241  |     return p;
+   242  | }
+   243  | 
+   244  | void set_parent_to_this(Proc *proc)
+   245  | {
+   246  |     acquire_spinlock(&global_process_lock);
+   247  |     Proc *parent=thisproc();
+   248  |     _detach_from_list(&proc->ptnode);
+   249  |     proc->parent=parent;
+   250  |     _insert_into_list(parent->children.prev,&proc->ptnode);
+   251  |     release_spinlock(&global_process_lock);
+   252  | }
+   253  | 
+   254  | int start_proc(Proc *p, void (*entry)(u64), u64 arg)
+   255  | {
+   256  |     // TODO:
+   257  |     // 1. set the parent to root_proc if NULL
+   258  |     acquire_spinlock(&global_process_lock);
+   259  |     if (p->parent==NULL){
+   260  |         
+   261  |         p->parent=&root_proc;
+   262  |         _detach_from_list(&p->ptnode);
+   263  |         _insert_into_list(root_proc.children.prev, &p->ptnode);
+   264  |         
+   265  |     }
+   266  |     
+   267  |     p->kcontext->lr=(u64)&proc_entry;
+   268  |     p->kcontext->x0=(u64)entry;
+   269  |     p->kcontext->x1=(u64)arg;
+   270  |     
+   271  |     p->state=UNUSED;
+   272  |     int id =p->pid;
+   273  |     activate_proc(p);//activate函数内部有锁
+   274  |     // NOTE: be careful of concurrency
+   275  | #ifdef PID_DEBUG
+   276  |     printk("cpuid: %lld, start pid: %d, its parent is %d\n",cpuid(),p->pid,p->parent->pid);
+   277  | #endif
+   278  |     release_spinlock(&global_process_lock);
+   279  |     return id;
+   280  | }
+   281  | 
+   282  | int wait(int *exitcode)
+   283  | {
+   284  |     while (1){
+   285  |         Proc *parent=thisproc();
+   286  |         acquire_spinlock(&global_process_lock);
+   287  |         
+   288  |         bool has_children = !_empty_list(&parent->children);
+   289  |         if (!has_children){
+   290  |             release_spinlock(&global_process_lock);
+   291  | #ifdef PID_DEBUG
+   292  |             printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
+   293  | #endif
+   294  |             return -1;
+   295  |         }
+   296  | 
+   297  |         Proc *zombie_child=NULL;
+   298  |         _for_in_list(node, &parent->children) {
+   299  |             if (node==&parent->children){
+   300  |                 continue;
+   301  |             }
+   302  |             Proc *p = container_of(node, Proc, ptnode);
+   303  |             if (is_zombie(p)) {
+   304  |                 zombie_child = p;
+   305  | #ifdef PID_DEBUG
+   306  |                 printk("Found zombie child pid: %d\n", p->pid);
+   307  | #endif
+   308  |                 break;
+   309  |             }
+   310  |         }
+   311  |         
+   312  |         if (zombie_child){
+   313  |             if (exitcode!=NULL){
+   314  |                 *exitcode=zombie_child->exitcode;
+   315  |             }
+   316  |             int child_pid=zombie_child->pid;
+   317  |             pid_recycler(child_pid);
+   318  |             if (zombie_child->kstack){
+   319  |                 kfree_page(zombie_child->kstack);
+   320  |             }
+   321  |             _detach_from_list(&zombie_child->ptnode);
+   322  |             kfree(zombie_child);
+   323  |             release_spinlock(&global_process_lock);
+   324  |             return child_pid;
+   325  |         }
+   326  | 
+   327  |         release_spinlock(&global_process_lock);
+   328  |         if (!wait_sem(&parent->childexit)){
+   329  |             return -1;
+   330  |         }
+   331  |     }
+   332  | }
+   333  | 
+   334  | NO_RETURN void exit(int code)
+   335  | {
+   336  |     
+   337  |      
+   338  |         // TODO:
+   339  |     // 1. set the exitcode
+   340  |     // 2. clean up the resources
+   341  |     // 3. transfer children to the root_proc, and notify the root_proc if there is zombie
+   342  |     // 4. sched(ZOMBIE)
+   343  |     // NOTE: be careful of concurrency
+   344  | 
+   345  |     acquire_spinlock(&global_process_lock);
+   346  |     Proc *p=thisproc();
+   347  | #ifdef debug_sched
+   348  |     printk("proc.c:224, p->state is %d\n",p->state);
+   349  | #endif
+   350  |     p->exitcode=code;
+   351  |     
+   352  |     // 将所有子进程过继给root_proc
+   353  |     ListNode orphaned_children;
+   354  |     init_list_node(&orphaned_children);
+   355  |     while (!_empty_list(&p->children)) {
+   356  |         ListNode *child_node = p->children.next;
+   357  |         _detach_from_list(child_node);
+   358  |         _insert_into_list(orphaned_children.prev, child_node);
+   359  |     }
+   360  |     while (!_empty_list(&orphaned_children)) {
+   361  |         ListNode *child_node = orphaned_children.next;
+   362  |         _detach_from_list(child_node);
+   363  |         _insert_into_list(root_proc.children.prev, child_node);
+   364  |         Proc *child = container_of(child_node, Proc, ptnode);
+   365  |         child->parent = &root_proc;
+   366  |         if (is_zombie(child)) {
+   367  |             if ((u64)&root_proc<0x20){
+   368  |                 printk("Error proc.c: 312\n");
+   369  |             }
+   370  |             post_sem(&root_proc.childexit);
+   371  |         }
+   372  |     }
+   373  |     ASSERT(p->parent!=NULL);
+   374  |     if (!p->parent){
+   375  |         p->parent=&root_proc;
+   376  |         _detach_from_list(&p->ptnode);
+   377  |         _insert_into_list(root_proc.children.prev, &p->ptnode);
+   378  |     }
+   379  | 
+   380  |     if ((u64)p->parent<0x20){
+   381  |         printk("BUG at proc.c :325\n");
+   382  |         PANIC();
+   383  |     }
+   384  |     free_pgdir(&p->pgdir);
+   385  |     post_sem(&p->parent->childexit);
+   386  | 
+   387  |     // 不在此处获取调度锁，sched()函数会自己处理
+   388  |     acquire_sched_lock(); 
+   389  |     
+   390  |     // acquire_spinlock(&p->lock);
+   391  | 
+   392  |     release_spinlock(&global_process_lock);
+   393  |     
+   394  |     // printk("Ready to Enter zombie, Proc %d, cpu %lld\n",p->pid,cpuid());
+   395  |     sched(ZOMBIE);
+   396  |     printk("exit: sched(ZOMBIE) should not return");
+   397  |     PANIC();
+   398  | }
+   399  | 
+   400  | Proc *find_to_kill(int pid, Proc *parent){
+   401  |     if (parent->pid==pid){
+   402  |         if (parent->state==UNUSED){
+   403  |             return NULL;
+   404  |         }
+   405  |         return parent;
+   406  |     }
+   407  |     _for_in_list(node,&parent->children){
+   408  |         if (node==&parent->children)continue;
+   409  |         Proc *child=container_of(node, Proc, ptnode);
+   410  |         Proc *find=find_to_kill(pid, child);
+   411  |         if (find) return find;
+   412  |     }
+   413  |     return NULL;
+   414  | }
+   415  | 
+   416  | int kill(int pid)
+   417  | {
+   418  |     // TODO:
+   419  |     // Set the killed flag of the proc to true and return 0.
+   420  |     // Return -1 if the pid is invalid (proc not found).
+   421  |     acquire_spinlock(&global_process_lock);
+   422  |     // printk("try to kill %d\n",pid);
+   423  |     Proc *target=find_to_kill(pid, &root_proc);
+   424  |     // printk("find kill target %d\n",pid);
+   425  |     if (!target){
+   426  |         release_spinlock(&global_process_lock);
+   427  |         return -1;
+   428  |     }
+   429  |     target->killed=true;
+   430  |     alert_proc(target);
+   431  |     release_spinlock(&global_process_lock);
+   432  |     
+   433  |     return 0;
+   434  | }
+   435  | 
+   436  | /*
+   437  |  * Create a new process copying p as the parent.
+   438  |  * Sets up stack to return as if from system call.
+   439  |  */
+   440  | void trap_return();
+   441  | int fork()
+   442  | {
+   443  |     /**
+   444  |      * (Final) TODO BEGIN
+   445  |      * 
+   446  |      * 1. Create a new child process.
+   447  |      * 2. Copy the parent's memory space.
+   448  |      * 3. Copy the parent's trapframe.
+   449  |      * 4. Set the parent of the new proc to the parent of the parent.
+   450  |      * 5. Set the state of the new proc to RUNNABLE.
+   451  |      * 6. Activate the new proc and return its pid.
+   452  |      */
+   453  | 
+   454  |     /* (Final) TODO END */
+   455  | }
+================================================================================
+# src/aarch64/trap.S
+
+     1  | #define pushp(a, b) stp a, b, [sp, #-0x10]!
+     2  | #define popp(a, b) ldp a, b, [sp], #0x10 
+     3  | 
+     4  | /* `exception_vector.S` send all traps here. */
+     5  | .global trap_entry
+     6  | trap_entry:
+     7  | // TODO: save UserContext
+     8  | pushp(x16,x17)
+     9  | pushp(x14,x15)
+    10  | pushp(x12,x13)
+    11  | pushp(x10,x11)
+    12  | pushp(x8,x9)
+    13  | pushp(x6,x7)
+    14  | pushp(x4,x5)
+    15  | pushp(x2,x3)
+    16  | pushp(x0,x1)
+    17  | mrs x1,elr_el1
+    18  | mrs x0,spsr_el1
+    19  | pushp(x0,x1)
+    20  | mrs x0,sp_el0
+    21  | pushp(x0, xzr)
+    22  | mov x0,sp //UserContext指针
+    23  | bl trap_global_handler
+    24  |  
+    25  | .global trap_return
+    26  | trap_return:
+    27  | // TODO: restore UserContext
+    28  | 
+    29  | popp(x0, x1)       // x0 = sp_el0, x1 = 0 (来自xzr)
+    30  | msr sp_el0, x0     // 恢复用户栈指针
+    31  | popp(x0,x1)
+    32  | msr spsr_el1,x0
+    33  | msr elr_el1,x1
+    34  | popp(x0,x1)
+    35  | popp(x2,x3)
+    36  | popp(x4,x5)
+    37  | popp(x6,x7)
+    38  | popp(x8,x9)
+    39  | popp(x10,x11)
+    40  | popp(x12,x13)
+    41  | popp(x14,x15)
+    42  | popp(x16,x17)
+    43  | eret
+
 ================================================================================

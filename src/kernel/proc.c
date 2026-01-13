@@ -188,11 +188,15 @@ void init_kproc()
     init_spinlock(&global_process_lock);
     init_pid_allocator();
     
+    printk("init_kproc: initializing root_proc\n");
+    
     // 2. init the root_proc (finished)
 
     init_proc(&root_proc);
     root_proc.parent = &root_proc;
     start_proc(&root_proc, kernel_entry, 123456);
+    
+    printk("init_kproc: root_proc started, pid=%d\n", root_proc.pid);
 }
 
 void init_proc(Proc *p)
@@ -451,26 +455,33 @@ int fork()
      * 6. Activate the new proc and return its pid.
      */
 
-    /* (Final) TODO END */
-}
+    Proc *parent=thisproc();
+    Proc *child=create_proc();
+    if (child==NULL){
+        return -1;
+    }
+    //!!! ?失败怎么办
+    copy_sections(&parent->pgdir.section_head, &child->pgdir.section_head);
+    *(child->ucontext)=*(parent->ucontext);
 
-/*
- * Create a new process copying p as the parent.
- * Sets up stack to return as if from system call.
- */
-void trap_return();
-int fork()
-{
-    /**
-     * (Final) TODO BEGIN
-     * 
-     * 1. Create a new child process.
-     * 2. Copy the parent's memory space.
-     * 3. Copy the parent's trapframe.
-     * 4. Set the parent of the new proc to the parent of the parent.
-     * 5. Set the state of the new proc to RUNNABLE.
-     * 6. Activate the new proc and return its pid.
-     */
+    child->ucontext->x[0]=0;//fork返回值为0
+    for (int i=0;i<NOFILE;i++){
+        if (parent->oftable.files[i]){
+            child->oftable.files[i]=file_dup(parent->oftable.files[i]);
 
+        }
+    }
+    child->cwd=inodes.share(parent->cwd);
+    acquire_spinlock(&global_process_lock);
+    child->parent=parent;
+    _insert_into_list(parent->children.prev, &child->ptnode);
+    release_spinlock(&global_process_lock);
+
+    child->kcontext->lr=(u64)&trap_return;
+    child->kcontext->x0=(u64)(child->ucontext);
+    // acquire_spinlock(&child->lock);
+    
+    activate_proc(child);
+    return child->pid;
     /* (Final) TODO END */
 }

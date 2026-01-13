@@ -72,8 +72,8 @@ if __name__ == "__main__":
     # 定义要合并的文件路径
     files_to_merge = [
         # "src/kernel/sched.c",
-        # "src/kernel/proc.h",
-        # "src/kernel/proc.c",
+        "src/kernel/proc.h",
+        "src/kernel/proc.c",
         # "src/kernel/cpu.h",
         # "src/kernel/cpu.c",
         # "src/kernel/pt.c",
@@ -87,11 +87,12 @@ if __name__ == "__main__":
         # "src/common/buf.h"
 
         # "src/kernel/syscall.c",
-        # "src/aarch64/trap.S",
+        "src/aarch64/trap.S",
         # "src/test/user_proc_test.c",
         # "src/user/loop.S"
-        "src/fs/file.c",
-        "src/fs/file.h",
+        # "src/fs/file.c",
+        # "src/fs/file.h",
+        # "src/kernel/proc.h"
     ]
     
     # 定义输出文件路径

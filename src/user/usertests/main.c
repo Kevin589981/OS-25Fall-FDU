@@ -6,6 +6,12 @@
 #include <string.h>
 #include <unistd.h>
 
+// 文件系统常量定义（从 fs/defines.h 复制）
+#define BLOCK_SIZE 512
+#define INODE_NUM_DIRECT 12
+#define INODE_NUM_INDIRECT (BLOCK_SIZE / sizeof(uint32_t))
+#define INODE_MAX_BLOCKS (INODE_NUM_DIRECT + INODE_NUM_INDIRECT)
+
 char buf[8192];
 char name[3];
 

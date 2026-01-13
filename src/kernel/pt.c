@@ -127,7 +127,11 @@ void attach_pgdir(struct pgdir *pgdir)
 void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
 {
     /* (Final) TODO BEGIN */
-
+    PTEntriesPtr pte = get_pte(pd, va, true);
+    if (pte == NULL) {
+        PANIC();
+    }
+    *pte = K2P(ka) | flags | PTE_VALID;
     /* (Final) TODO END */
 }
 
@@ -139,6 +143,42 @@ void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
 int copyout(struct pgdir *pd, void *va, void *p, usize len)
 {
     /* (Final) TODO BEGIN */
-
+    u64 va_start = (u64)va;
+    u8 *src = (u8 *)p;
+    
+    while (len > 0) {
+        u64 va_page = PAGE_BASE(va_start);
+        u64 offset = va_start - va_page;
+        u64 n = MIN(PAGE_SIZE - offset, len);
+        
+        // 获取或分配页表项
+        PTEntriesPtr pte = get_pte(pd, va_start, true);
+        if (pte == NULL) {
+            return -1;
+        }
+        
+        // 如果页面不存在，分配新页
+        void *pa;
+        if ((*pte & PTE_VALID) == 0) {
+            void *page = kalloc_page();
+            if (page == NULL) {
+                return -1;
+            }
+            memset(page, 0, PAGE_SIZE);
+            *pte = K2P(page) | PTE_USER_DATA | PTE_VALID;
+            pa = page;
+        } else {
+            pa = (void *)P2K(PTE_ADDRESS(*pte));
+        }
+        
+        // 复制数据
+        memmove((u8 *)pa + offset, src, n);
+        
+        len -= n;
+        src += n;
+        va_start += n;
+    }
+    
+    return 0;
     /* (Final) TODO END */
 }

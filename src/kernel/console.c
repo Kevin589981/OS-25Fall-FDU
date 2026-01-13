@@ -23,6 +23,7 @@ isize console_write(Inode *ip, char *buf, isize n)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1; // TODO: 实现 console
 }
 
 /**
@@ -36,6 +37,7 @@ isize console_read(Inode *ip, char *dst, isize n)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1; // TODO: 实现 console
 }
 
 void console_intr(char c)

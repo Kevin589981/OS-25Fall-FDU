@@ -755,7 +755,7 @@ static Inode* namex(const char* path,
         }
         inodes.unlock(inode);
         inodes.put(ctx,inode);
-        Inode *next_inode=inodes.get(next_inode_no);
+        inode=inodes.get(next_inode_no);  // 更新inode为下一级目录/文件
         
     }
     if (nameiparent){

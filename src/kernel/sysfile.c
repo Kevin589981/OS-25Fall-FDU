@@ -79,6 +79,8 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
     /* (Final) TODO BEGIN */
     
     /* (Final) TODO END */
+    (void)addr; (void)length; (void)prot; (void)flags; (void)fd; (void)offset;
+    return (u64)-1; // TODO: 实现 mmap
 }
 
 define_syscall(munmap, void *addr, size_t length)
@@ -86,6 +88,8 @@ define_syscall(munmap, void *addr, size_t length)
     /* (Final) TODO BEGIN */
     
     /* (Final) TODO END */
+    (void)addr; (void)length;
+    return -1; // TODO: 实现 munmap
 }
 
 define_syscall(dup, int fd)
@@ -136,7 +140,7 @@ define_syscall(close, int fd)
     /* (Final) TODO BEGIN */
     File *f;
     Proc *p=thisproc();
-    if ((f=fd2file)==NULL){
+    if ((f=fd2file(fd))==NULL){
         return -1;
     }
     p->oftable.files[fd]=NULL;
@@ -325,17 +329,17 @@ Inode *create(const char *path, short type, short major, short minor,
         ip->entry.num_links++;       // 新目录的链接数+1 (因为有 '.')
 
         // 在新目录中创建 '.' (指向自己)
-        if (inodes.insert(ctx, ip, ".", inode_no) == -1) {
+        if (inodes.insert(ctx, ip, ".", inode_no) == (usize)-1) {
             goto fail_creation;
         }
         // 在新目录中创建 '..' (指向父目录)
-        if (inodes.insert(ctx, ip, "..", dp->inode_no) == -1) {
+        if (inodes.insert(ctx, ip, "..", dp->inode_no) == (usize)-1) {
             goto fail_creation;
         }
     }
 
     // 6. 将新 Inode 链接到父目录中
-    if (inodes.insert(ctx, dp, name, inode_no) == -1) {
+    if (inodes.insert(ctx, dp, name, inode_no) == (usize)-1) {
         goto fail_creation;
     }
     
@@ -518,4 +522,6 @@ define_syscall(pipe2, int pipefd[2], int flags)
     /* (Final) TODO BEGIN */
     
     /* (Final) TODO END */
+    (void)pipefd; (void)flags;
+    return -1; // TODO: 实现 pipe2
 }

@@ -54,7 +54,26 @@ void syscall_entry(UserContext *context)
  */
 bool user_readable(const void *start, usize size) {
     /* (Final) TODO BEGIN */
+    struct Proc *p=thisproc();
+    if (p==NULL||size==0)return false;
+    struct pgdir *pgdir = &p->pgdir;
+    u64 va = (u64)start;
+    u64 end_va = va + size;
+    u64 current_va=PAGE_BASE(va);
 
+
+    for (;current_va<end_va;current_va+=PAGE_SIZE){
+        
+        PTEntriesPtr pte = get_pte(pgdir, current_va, false);
+        if (pte == NULL) {
+            return false;
+        }
+        
+        if ((*pte & PTE_VALID) == 0 || (*pte & PTE_USER) == 0) {
+            return false; 
+        }
+    }
+    return true;
     /* (Final) TODO END */
 }
 
@@ -65,7 +84,27 @@ bool user_readable(const void *start, usize size) {
  */
 bool user_writeable(const void *start, usize size) {
     /* (Final) TODO Begin */
-
+    Proc *p = thisproc();
+    if (p==NULL||size==0){
+        return true;
+    }
+    struct pgdir *pgdir = &p->pgdir;
+    u64 va = (u64)start;
+    u64 end_va = va + size;
+    u64 current_va = PAGE_BASE(va);
+    for (; current_va < end_va; current_va += PAGE_SIZE) {
+        PTEntriesPtr pte = get_pte(pgdir, current_va, false);
+        if (pte == NULL) {
+            return false;
+        }
+        if ((*pte & PTE_VALID) == 0 || (*pte & PTE_USER) == 0) {
+            return false; 
+        }
+        if ((*pte & PTE_RO) != 0) {
+            return false;
+        }
+    }
+    return TRUE;
     /* (Final) TODO End */
 }
 

@@ -1,6 +1,7 @@
 #include <driver/virtio.h>
 #include <fs/block_device.h>
 #include <common/string.h>
+#include <kernel/printk.h>
 
 /**
     @brief a simple implementation of reading a block from SD card.
@@ -9,11 +10,15 @@
     @param[out] buffer the buffer to store the data
  */
 static void sd_read(usize block_no, u8 *buffer) {
+    printk("sd_read: reading block %lld\n", (u64)block_no);
     Buf b;
     b.block_no = (u32)block_no;
     b.flags = 0;
+    printk("sd_read: calling virtio_blk_rw\n");
     virtio_blk_rw(&b);
+    printk("sd_read: virtio_blk_rw returned\n");
     memcpy(buffer, b.data, BLOCK_SIZE);
+    printk("sd_read: completed\n");
 }
 
 /**

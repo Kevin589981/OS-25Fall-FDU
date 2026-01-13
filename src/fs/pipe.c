@@ -30,6 +30,7 @@ int pipe_alloc(File **f0, File **f1)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1; // TODO: 实现 pipe
 }
 
 void pipe_close(Pipe *pi, int writable)
@@ -44,6 +45,7 @@ int pipe_write(Pipe *pi, u64 addr, int n)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1; // TODO: 实现 pipe
 }
 
 int pipe_read(Pipe *pi, u64 addr, int n)
@@ -51,4 +53,5 @@ int pipe_read(Pipe *pi, u64 addr, int n)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1; // TODO: 实现 pipe
 }

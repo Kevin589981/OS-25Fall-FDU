@@ -60,6 +60,7 @@ static void free_desc(struct virtq *virtq, u16 n)
 int virtio_blk_rw(Buf *b)
 {
     enum diskop op = DREAD;
+    printk("63\n");
     // 脏数据，需要写入
     if (b->flags & B_DIRTY)
         op = DWRITE;
@@ -78,8 +79,9 @@ int virtio_blk_rw(Buf *b)
         return -1;
     hdr.reserved = 0;
     hdr.sector = sector;
-
+    printk("82\n");
     acquire_spinlock(&disk.lk);
+    printk("84\n");
     // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
     int d0 = alloc_desc(&disk.virtq);
     if (d0 < 0)
@@ -116,12 +118,12 @@ int virtio_blk_rw(Buf *b)
     arch_fence();
     REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
     arch_fence();
-
+    printk("virtio_blk_rw: request submitted, waiting for completion\n");
     /* LAB 4 TODO 1 BEGIN */
     release_spinlock(&disk.lk);
-    // printk("virtio_bk.c:122\n");
+    printk("virtio_bk.c:122\n");
     unalertable_wait_sem(&b->sem);
-    // printk("virtio_bk.c:124\n");
+    printk("virtio_bk.c:124\n");
     acquire_spinlock(&disk.lk);
     /* LAB 4 TODO 1 END */
 
@@ -133,15 +135,19 @@ int virtio_blk_rw(Buf *b)
 // 中断，触发唤醒对应的进程
 static void virtio_blk_intr()
 {
+    printk("virtio_blk_intr: interrupt received\n");
     acquire_spinlock(&disk.lk);
 
     u32 intr_status = REG(VIRTIO_REG_INTERRUPT_STATUS);
     REG(VIRTIO_REG_INTERRUPT_ACK) = intr_status & 0x3;
+    printk("virtio_blk_intr: intr_status=%x\n", intr_status);
 
     int d0;
     while (disk.virtq.last_used_idx != disk.virtq.used->idx) {
+        printk("virtio_blk_intr: processing used ring entry\n");
         d0 = disk.virtq.used->ring[disk.virtq.last_used_idx % NQUEUE].id;
         if (disk.virtq.info[d0].status != 0) {
+            printk("virtio_blk_intr: ERROR status=%d\n", disk.virtq.info[d0].status);
             PANIC();
         }
 
@@ -149,6 +155,7 @@ static void virtio_blk_intr()
         u8 *data_ptr = disk.virtq.info[d0].buf;
         if (data_ptr) {
             Buf *b = container_of(data_ptr, Buf, data[0]);
+            printk("virtio_blk_intr: posting semaphore\n");
             post_sem(&b->sem);
         }
 
@@ -159,6 +166,7 @@ static void virtio_blk_intr()
         disk.virtq.last_used_idx++;
     }
 
+    printk("virtio_blk_intr: done\n");
     release_spinlock(&disk.lk);
 }
 

@@ -76,7 +76,9 @@ static INLINE void device_write(Block *block) {
 
 // 从磁盘读取日志头。
 static INLINE void read_header() {
+    printk("read_header: calling device->read for block %lld\n", (u64)sblock->log_start);
     device->read(sblock->log_start, (u8 *)&header);
+    printk("read_header: device->read completed\n");
 }
 
 // 将日志头写回磁盘。
@@ -176,18 +178,25 @@ static void cache_release(Block *block) {
 
 // see `cache.h`.
 void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
+    printk("init_bcache: starting\n");
     sblock = _sblock;
     device = _device;
 
     // TODO
+    printk("init_bcache: initializing locks and lists\n");
     init_spinlock(&lock);
     init_list_node(&head);
     init_spinlock(&log.lock);
     init_sem(&log.sem,0);
     log.outstanding=0;
     log.committing=FALSE;
+    
+    printk("init_bcache: calling read_header\n");
     read_header();
+    printk("init_bcache: read_header done, num_blocks=%lld\n", (u64)header.num_blocks);
+    
     if (header.num_blocks>0){
+        printk("init_bcache: recovering %lld blocks\n", (u64)header.num_blocks);
         for (usize i=0;i<header.num_blocks;i++){
             Block buf_block;
             buf_block.block_no=sblock->log_start+1+i;
@@ -197,8 +206,10 @@ void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
         }
         header.num_blocks=0;
         write_header();
+        printk("init_bcache: recovery complete\n");
     }
-
+    
+    printk("init_bcache: completed\n");
 }
 
 // see `cache.h`.

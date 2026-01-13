@@ -121,13 +121,14 @@ isize file_read(struct file* f, char* addr, isize n) {
         }
         inodes.unlock(f->ip);
     } else if (f->type == FD_PIPE){
-        read_bytes=pipe_read(f->pipe,addr,(int)n);
+        read_bytes=pipe_read(f->pipe,(u64)addr,(int)n);
         if (read_bytes>0){
             f->off+=read_bytes;
         }
     }else{
         return -1;
     }
+    return read_bytes;
     /* (Final) TODO END */
 }
 

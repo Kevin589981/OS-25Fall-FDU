@@ -441,5 +441,16 @@ void kfree(void* ptr) {
     release_spinlock(&pool->global_lock);
 }
 void* get_zero_page() {
-    return NULL;
+    static void *zero_page = NULL;
+    if (zero_page == NULL) {
+        zero_page = kalloc_page();
+        if (zero_page != NULL) {
+            memset(zero_page, 0, PAGE_SIZE);
+        }
+    }
+    return zero_page;
+}
+
+u64 left_page_cnt() {
+    return (u64)free_page_count;
 }
