@@ -1,8 +1,17 @@
 #include <driver/virtio.h>
 #include <fs/block_device.h>
 #include <common/string.h>
-#include <kernel/printk.h>
+#ifdef PRINT_BLOCK_DEVICE_LOG
+    #include <kernel/printk.h>
+#else
+    #define printk(...) do { } while(0)
+#endif
 
+// 测试示例（可选）
+void test_print_log() {
+    // 当PRINT_FILE_SYSTEM_LOG定义时，会正常打印；未定义时，此行无任何效果
+    printk("File system log: %s, %d\n", "test", 123);
+}
 /**
     @brief a simple implementation of reading a block from SD card.
 

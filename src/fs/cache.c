@@ -2,7 +2,14 @@
 #include <common/string.h>
 #include <fs/cache.h>
 #include <kernel/mem.h>
-#include <kernel/printk.h>
+
+#ifdef PRINT_CACHE_LOG
+
+    #include <kernel/printk.h>
+#else
+    #define printk(...) do { } while(0)
+#endif
+
 #include <kernel/proc.h>
 static int num_cached_blocks=0;
 /**

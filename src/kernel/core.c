@@ -45,7 +45,7 @@ NO_RETURN void kernel_entry()
     // printk("kernel_entry: init_filesystem done\n");
     
     // printk("Hello world! (Core %lld)\n", cpuid());
-    proc_test();
+    // proc_test();
     // vm_test();
     // user_proc_test();
     // printk("test proc_test() and user_proc_test() in lab5 passed.\n");
@@ -95,7 +95,9 @@ NO_RETURN void kernel_entry()
     if (p == NULL) {
         PANIC();
     }
-    
+    printk("Creating first user process (PID %d)...\n", p->pid);
+    Proc *parent = thisproc();
+    printk("Parent PID is %d\n", parent->pid);
     // 设置父进程为root进程
     set_parent_to_this(p);
     

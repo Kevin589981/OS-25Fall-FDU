@@ -5,7 +5,17 @@
 #include <common/sem.h>
 #include <common/string.h>
 #include <kernel/mem.h>
-#include <kernel/printk.h>
+// 条件编译：根据PRINT_FILE_SYSTEM_LOG是否定义来控制printk的行为
+#ifdef PRINT_VIRTIO_BLK_LOG
+    // 定义了该宏，正常包含printk头文件，使用原生printk
+    #include <kernel/printk.h>
+#else
+    // 未定义该宏，将printk定义为空操作，不打印任何内容
+    // do{...}while(0) 是为了保证宏在任何语法场景下都能正常工作（比如if/else后不加{}的情况）
+    // __VA_ARGS__ 用于接收printk的可变参数（如格式化字符串+参数）
+    #define printk(...) do { } while(0)
+#endif
+
 
 #define VIRTIO_MAGIC 0x74726976
 
