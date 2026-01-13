@@ -1,3 +1,5 @@
+#define PRINT_BLOCK_DEVICE_LOG 1
+
 #include <driver/virtio.h>
 #include <fs/block_device.h>
 #include <common/string.h>
@@ -60,6 +62,21 @@ BlockDevice block_device;
 void init_block_device() {
     block_device.read = sd_read;
     block_device.write = sd_write;
+    
+    // 读取 SuperBlock
+    // 文件系统在分区 2，起始扇区是 133120（见 MBR）
+    // SuperBlock 在分区内的块 1，所以绝对位置是 133120 + 1 = 133121
+    usize superblock_sector = 133120 + 1;
+    printk("init_block_device: reading superblock from sector %llu\n", (u64)superblock_sector);
+    sd_read(superblock_sector, sblock_data);
+    printk("init_block_device: superblock loaded\n");
+    
+    #ifdef PRINT_BLOCK_DEVICE_LOG
+    // 调试：打印 SuperBlock 信息
+    const SuperBlock *sb = (const SuperBlock *)sblock_data;
+    printk("SuperBlock info: num_blocks=%u, num_inodes=%u, inode_start=%u\n",
+           sb->num_blocks, sb->num_inodes, sb->inode_start);
+    #endif
 }
 
 const SuperBlock *get_super_block() { return (const SuperBlock *)sblock_data; }

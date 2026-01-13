@@ -80,6 +80,8 @@ PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc)
 void init_pgdir(struct pgdir *pgdir)
 {
     pgdir->pt = NULL;
+    init_spinlock(&pgdir->lock);
+    init_list_node(&pgdir->section_head);
 }
 
 void free_pgdir(struct pgdir *pgdir)

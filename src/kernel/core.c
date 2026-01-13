@@ -103,22 +103,23 @@ NO_RETURN void kernel_entry()
     
     // 创建代码段section
     u64 icode_size = (u64)eicode - (u64)icode;
+    printk("icode_size is %lld\n",icode_size);
     u64 icode_pages = (icode_size + PAGE_SIZE - 1) / PAGE_SIZE;
     
     struct section *text_sec = kalloc(sizeof(struct section));
     if (text_sec == NULL) {
         PANIC();
     }
-    
+    printk("allocating section\n");
     text_sec->begin = 0x0;
     text_sec->end = icode_pages * PAGE_SIZE;
     text_sec->flags = ST_HEAP;  // 匿名段
     text_sec->fp = NULL;
     text_sec->offset = 0;
     text_sec->length = 0;
-    
+    printk("insert into list\n");
     _insert_into_list(&p->pgdir.section_head, &text_sec->stnode);
-    
+    printk("entering loop.\n");
     // 分配物理页并复制icode内容
     for (u64 i = 0; i < icode_pages; i++) {
         void *page = kalloc_page();
@@ -128,11 +129,12 @@ NO_RETURN void kernel_entry()
         memset(page, 0, PAGE_SIZE);
         
         u64 copy_size = MIN((u64)PAGE_SIZE, icode_size - i * PAGE_SIZE);
+        printk("memmove %lld\n",i);
         memmove(page, icode + i * PAGE_SIZE, copy_size);
-        
+        printk("vmmap %lld\n",i);
         vmmap(&p->pgdir, i * PAGE_SIZE, page, PTE_USER_DATA);
     }
-    
+    printk("allocating stack\n");
     // 创建用户栈
     #define INIT_STACK_SIZE (8 * PAGE_SIZE)
     #define INIT_STACK_TOP 0x0000004000000000UL
@@ -160,7 +162,7 @@ NO_RETURN void kernel_entry()
     p->kcontext->lr = (u64)&trap_return;
     
     // 激活进程
-    p->state = RUNNABLE;
+    p->state = UNUSED;
     activate_proc(p);
     
     printk("First user process created, entering scheduler...\n");
