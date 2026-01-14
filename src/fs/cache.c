@@ -2,7 +2,7 @@
 #include <common/string.h>
 #include <fs/cache.h>
 #include <kernel/mem.h>
-
+#define PRINT_CACHE_LOG 1
 #ifdef PRINT_CACHE_LOG
 
     #include <kernel/printk.h>
@@ -166,6 +166,7 @@ static Block *cache_acquire(usize block_no) {
     _insert_into_list(&head, &b->node);
     release_spinlock(&lock);
     unalertable_acquire_sleeplock(&b->lock);
+    printk("acquiring cache.\n");
     if (!b->valid){
         device_read(b);
         b->valid=TRUE;
@@ -180,7 +181,8 @@ static void cache_release(Block *block) {
     acquire_spinlock(&lock);
     block->acquired=FALSE;
     release_spinlock(&lock);
-    release_sleeplock(&block->lock);
+    post_all_sem(&block->lock);
+    // release_sleeplock(&block->lock);
 }
 
 // see `cache.h`.
@@ -289,6 +291,7 @@ void commit(){
         for (usize i = 0; i < header.num_blocks; i++) {
             Block buf_block;
             buf_block.block_no = sblock->log_start + 1 + i;
+            printk("committing and read.\n");
             device_read(&buf_block); 
             buf_block.block_no = header.block_no[i];
             device_write(&buf_block);

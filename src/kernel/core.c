@@ -12,6 +12,7 @@
 #include <kernel/paging.h>
 #include <common/string.h>
 #include <common/list.h>
+#include <fs/block_device.h>
 
 volatile bool panic_flag;
 extern int virtio_blk_rw(Buf *b);
@@ -38,20 +39,8 @@ NO_RETURN void idle_entry()
 
 NO_RETURN void kernel_entry()
 {
-    // printk("kernel_entry: started on CPU %lld\n", cpuid());
-    // extern void init_filesystem();
-    // printk("kernel_entry: calling init_filesystem\n");
-    init_filesystem();
-    // printk("kernel_entry: init_filesystem done\n");
-    
-    // printk("Hello world! (Core %lld)\n", cpuid());
-    // proc_test();
-    // vm_test();
-    // user_proc_test();
-    // printk("test proc_test() and user_proc_test() in lab5 passed.\n");
-    // io_test();
 
-    /* LAB 4 TODO 3 BEGIN */
+        /* LAB 4 TODO 3 BEGIN */
     Buf mbr_buf;
     mbr_buf.block_no = 0;  // MBR在LBA 0
     mbr_buf.flags = 0;      // 读操作
@@ -80,6 +69,25 @@ NO_RETURN void kernel_entry()
 
     printk("Partition 2: Start LBA = %u, Size = %u sectors\n", 
        part2_start_lba, part2_num_sectors);
+    
+    extern usize FS_PART_LBA_BASE;
+    FS_PART_LBA_BASE = part2_start_lba;
+    // printk("kernel_entry: started on CPU %lld\n", cpuid());
+    // extern void init_filesystem();
+    // printk("kernel_entry: calling init_filesystem\n");
+    init_filesystem();
+    // printk("kernel_entry: init_filesystem done\n");
+    
+    // printk("Hello world! (Core %lld)\n", cpuid());
+    // proc_test();
+    // vm_test();
+    // user_proc_test();
+    // printk("test proc_test() and user_proc_test() in lab5 passed.\n");
+    // io_test();
+
+
+    // block_device.read(part2_start_lba+1, (u8 *)get_super_block());
+
     /* LAB 4 TODO 3 END */
 
     /**

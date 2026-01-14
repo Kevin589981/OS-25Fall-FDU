@@ -5,7 +5,7 @@
 #include <common/sem.h>
 #include <common/string.h>
 #include <kernel/mem.h>
-// 条件编译：根据PRINT_FILE_SYSTEM_LOG是否定义来控制printk的行为
+#define PRINT_VIRTIO_BLK_LOG 1
 #ifdef PRINT_VIRTIO_BLK_LOG
     // 定义了该宏，正常包含printk头文件，使用原生printk
     #include <kernel/printk.h>
@@ -89,7 +89,7 @@ int virtio_blk_rw(Buf *b)
         return -1;
     hdr.reserved = 0;
     hdr.sector = sector;
-    // printk("82\n");
+    printk("acquire spinlock disk.lk\n");
     acquire_spinlock(&disk.lk);
     // printk("84\n");
     // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
@@ -128,12 +128,12 @@ int virtio_blk_rw(Buf *b)
     arch_fence();
     REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
     arch_fence();
-    // printk("virtio_blk_rw: request submitted, waiting for completion\n");
+    printk("virtio_blk_rw: request submitted, waiting for completion\n");
     /* LAB 4 TODO 1 BEGIN */
     release_spinlock(&disk.lk);
-    // printk("virtio_bk.c:122\n");
+    printk("virtio_bk.c:wait sem\n");
     unalertable_wait_sem(&b->sem);
-    // printk("virtio_bk.c:124\n");
+    printk("virtio_bk.c:sem get\n");
     acquire_spinlock(&disk.lk);
     /* LAB 4 TODO 1 END */
 
@@ -281,5 +281,6 @@ void virtio_init()
     arch_fence();
 
     set_interrupt_handler(VIRTIO_BLK_IRQ, virtio_blk_intr);
+    printk("interrupt handler set.\n");
     init_spinlock(&disk.lk);
 }
