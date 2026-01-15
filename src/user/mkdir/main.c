@@ -4,29 +4,19 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <errno.h>
 
 int main(int argc, char *argv[])
 {
     /* (Final) TODO BEGIN */
-    int i;
-
-    if (argc < 2)
-    {
-        printf("Usage: mkdir <directory1> <directory2> ...\n");
+    if (argc < 2) {
+        fprintf(stderr, "Usage: mkdir <dir>...\n");
         exit(1);
     }
-
-    for (i = 1; i < argc; i++)
-    {
-        if (mkdir(argv[i], 0) < 0)
-        {
-            fprintf(stderr, "mkdir: failed to create directory '%s': %s\n", argv[i], strerror(errno));
-            continue;
-        }
-        else
-        {
-            printf("Directory '%s' created successfully.\n", argv[i]);
+    
+    for (int i = 1; i < argc; i++) {
+        if (mkdir(argv[i], 0) < 0) {
+            fprintf(stderr, "mkdir: cannot create directory '%s'\n", argv[i]);
+            exit(1);
         }
     }
     /* (Final) TODO END */

@@ -11,98 +11,100 @@
 
 // maximum number of open files in the whole system.
 #define NFILE 65536
-#define NOFILE 64  
+#define NOFILE 128
 
 typedef struct file {
-    // type of the file.
-    // Note that a device file will be FD_INODE too.
+    // 文件类型。
+    // 注意：设备文件的类型也会是 FD_INODE。
     enum { FD_NONE, FD_PIPE, FD_INODE } type;
-    // reference count.
+    // 引用计数。
     int ref;
-    // whether the file is readable or writable.
+    // 文件是否可读或可写。
     bool readable, writable;
-    // corresponding underlying object for the file.
+    // 文件对应的底层对象。
     union {
         struct pipe* pipe;
         Inode* ip;
     };
-    // offset of the file in bytes.
-    // For a pipe, it is the number of bytes that have been written/read.
+    // 文件的字节偏移量。
+    // 对于管道而言，该值表示已写入/读取的字节数。
     usize off;
 } File;
 
 struct ftable {
-    // TODO: table of file objects in the system
+    // TODO: 系统中的文件对象表
     File files[NFILE];
-    // Note: you may need a lock to prevent concurrent access to the table!
-    SpinLock file_lock;
+    SpinLock lock;
+    // 注意：你可能需要一个锁来防止对该表的并发访问！
 };
+
 
 struct oftable {
-    // TODO: table of opened file descriptors in a process
-    File* ofiles[NOFILE];
+    // TODO: 进程中已打开的文件描述符表
+    File* files[NOFILE];
 };
 
-// initialize the global file table.
+// 初始化全局文件表。
 void init_ftable();
-// initialize the opened file table for a process.
+// 初始化进程的已打开文件表。
 void init_oftable(struct oftable*);
-
+void free_oftable(struct oftable*);
 /**
-    @brief find an unused (i.e. ref == 0) file in the global file table and set ref to 1.
+    @brief 在全局文件表中查找一个未使用的文件（即 ref == 0）并将其引用计数设为 1。
     
-    @return struct file* the found file object.
+    @return struct file* 找到的文件对象。
  */
 struct file* file_alloc();
 
 /**
-    @brief duplicate a file object by increasing its reference count.
+    @brief 通过增加引用计数来复制一个文件对象。
     
-    @return struct file* the same file object.
+    @return struct file* 同一个文件对象。
 
-    @see `inode_share` does the similar thing for inode.
+    @see `inode_share` 函数为索引节点（inode）执行类似的操作。
  */
+
 struct file* file_dup(struct file* f);
 
 /**
-    @brief decrease the reference count of a file object.
+    @brief 减少文件对象的引用计数。
 
-    If f->ref == 0, really close the file and put the inode (or close the pipe).
+    如果 f->ref == 0，则真正关闭该文件并释放索引节点（或关闭管道）。
 
-    @note since `cache.end_op` may sleep, you should not hold any lock (I mean, the lock for `ftable`)
-    when calling `end_op`! Before you put the inode, release the lock first.
+    @note 由于 `cache.end_op` 可能会导致休眠，因此在调用 `end_op` 时，
+    你不应该持有任何锁（指的是 `ftable` 的锁）！在释放索引节点之前，请先释放锁。
 
-    @see `inode_put` does the similar thing for inode.
+    @see `inode_put` 函数为索引节点（inode）执行类似的操作。
  */
 void file_close(struct file* f);
 
 /**
-    @brief read the metadata of a file.
+    @brief 读取文件的元数据。
 
-    You do not need to completely implement this method by yourself. Just call `stati`.
+    你无需自行完整实现此方法。只需调用 `stati` 函数即可。
     
-    @param[out] st the stat struct to be filled.
-    @return int 0 on success, or -1 on error.
+    @param[out] st 待填充的 stat 结构体。
+    @return int 成功返回 0，失败返回 -1。
 
-    @see `stati` will fill `st` for an inode.
+    @see `stati` 函数会为索引节点填充 `st` 结构体。
  */
 int file_stat(struct file* f, struct stat* st);
 
 /**
-    @brief read the content of `f` with range [f->off, f->off + n).
+    @brief 读取文件 `f` 中范围为 [f->off, f->off + n) 的内容。
 
     
-    @param[out] addr the buffer to be filled.
-    @param n the number of bytes to read.
-    @return isize the number of bytes actually read. -1 on error.
+    @param[out] addr 待填充的缓冲区。
+    @param n 要读取的字节数。
+    @return isize 实际读取的字节数。出错时返回 -1。
  */
 isize file_read(struct file* f, char* addr, isize n);
 
 /**
-    @brief write the content of `f` with range [f->off, f->off + n).
+    @brief 向文件 `f` 中范围为 [f->off, f->off + n) 的位置写入内容。
 
-    @param addr the buffer to be written.
-    @param n the number of bytes to write.
-    @return isize the number of bytes actually written. -1 on error.
+    @param addr 待写入的缓冲区。
+    @param n 要写入的字节数。
+    @return isize 实际写入的字节数。出错时返回 -1。
 */
 isize file_write(struct file* f, char* addr, isize n);

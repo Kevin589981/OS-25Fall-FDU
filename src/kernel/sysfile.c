@@ -37,9 +37,11 @@ struct iovec {
 static struct file *fd2file(int fd)
 {
     /* (Final) TODO BEGIN */
-    struct oftable *oft = &thisproc()->oftable;
-    if (fd < 0 || fd >= NOFILE) return NULL;
-    return oft->ofiles[fd];
+    Proc *p=thisproc();
+    if (fd<0||fd>=NOFILE){
+        return NULL;
+    }
+    return p->oftable.files[fd];
     /* (Final) TODO END */
 }
 
@@ -50,12 +52,11 @@ static struct file *fd2file(int fd)
 int fdalloc(struct file *f)
 {
     /* (Final) TODO BEGIN */
-    Proc* p = thisproc();
-    for (int fd = 0; fd < NOFILE; fd++)
-    {
-        if (p->oftable.ofiles[fd] == 0)
-        {
-            p->oftable.ofiles[fd] = f;
+    Proc *p=thisproc();
+
+    for (int fd=0;fd<NOFILE;fd++){
+        if (p->oftable.files[fd]==NULL){
+            p->oftable.files[fd]=f;
             return fd;
         }
     }
@@ -76,17 +77,19 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
                int offset)
 {
     /* (Final) TODO BEGIN */
-    (void)addr; (void)length; (void)prot; (void)flags; (void)fd; (void)offset;
-    return -1;
+    
     /* (Final) TODO END */
+    (void)addr; (void)length; (void)prot; (void)flags; (void)fd; (void)offset;
+    return (u64)-1; // TODO: 实现 mmap
 }
 
 define_syscall(munmap, void *addr, size_t length)
 {
     /* (Final) TODO BEGIN */
-    (void)addr; (void)length;
-    return -1;
+    
     /* (Final) TODO END */
+    (void)addr; (void)length;
+    return -1; // TODO: 实现 munmap
 }
 
 define_syscall(dup, int fd)
@@ -135,10 +138,13 @@ define_syscall(writev, int fd, struct iovec *iov, int iovcnt)
 define_syscall(close, int fd)
 {
     /* (Final) TODO BEGIN */
-    struct file *f = fd2file(fd);
-    if (!f) return -1;
+    File *f;
+    Proc *p=thisproc();
+    if ((f=fd2file(fd))==NULL){
+        return -1;
+    }
+    p->oftable.files[fd]=NULL;
     file_close(f);
-    thisproc()->oftable.ofiles[fd] = NULL;
     /* (Final) TODO END */
     return 0;
 }
@@ -276,58 +282,105 @@ Inode *create(const char *path, short type, short major, short minor,
               OpContext *ctx)
 {
     /* (Final) TODO BEGIN */
-    Inode *new_inode, *parent_dir;
-    char file_name[FILE_NAME_MAX_LENGTH];
-
-    if ((parent_dir = nameiparent(path, file_name, ctx)) == NULL) return NULL;
-
-    inodes.lock(parent_dir);
+    Inode *ip, *dp;
+    char name[FILE_NAME_MAX_LENGTH];
     usize inode_no;
-    if ((inode_no = inodes.lookup(parent_dir, file_name, 0)))
-    {
-        inodes.unlock(parent_dir);
-        inodes.put(ctx, parent_dir);
-        new_inode = inodes.get(inode_no);
-        inodes.lock(new_inode);
-        if (type == INODE_REGULAR && new_inode->entry.type == INODE_REGULAR) return new_inode;
-        // ERROR
-        inodes.unlock(new_inode);
-        inodes.put(ctx, new_inode);
+
+    // 1. 定位父目录。如果连父目录都找不到，直接失败。
+    if ((dp = nameiparent(path, name, ctx)) == 0) {
         return NULL;
     }
 
-    inode_no = inodes.alloc(ctx, type);
-    new_inode = inodes.get(inode_no);
-    inodes.lock(new_inode);
+    // 操作父目录前必须加锁
+    inodes.lock(dp);
 
-    new_inode->entry.type = type;
-    new_inode->entry.major = major;
-    new_inode->entry.minor = minor;
-    new_inode->entry.num_links = 1;
+    // 2. 检查要创建的文件/目录是否已经存在
+    if ((inode_no = inodes.lookup(dp, name, NULL)) != 0) {
+        // 它已经存在
+        inodes.unlock(dp);
+        inodes.put(ctx, dp); // 释放对父目录的引用
+        ip = inodes.get(inode_no); // 获取已存在的 Inode
+        inodes.lock(ip); // 锁定它
+        
+        // （可选）可以检查类型是否匹配，但按题目要求，直接返回即可
+        // if (ip->entry.type != type) { ... handle error ... }
 
-    if (type == INODE_DIRECTORY)
-    {
-        parent_dir->entry.num_links++;
-        inodes.sync(ctx, parent_dir, true);
+        return ip; // 返回已存在的 Inode
+    }
 
-        if (inodes.insert(ctx, new_inode, ".", inode_no) == (usize)(-1) ||
-            inodes.insert(ctx, new_inode, "..", parent_dir->inode_no) == (usize)(-1))
-        {
-            printk("Error: Failed to create '.' and '..'\n");
+    // 3. 分配一个新的 Inode
+    if ((inode_no = inodes.alloc(ctx, (InodeType)type)) == 0) {
+        // 分配失败，必须清理并返回
+        goto fail;
+    }
+    
+    // 获取新分配 Inode 的内存结构
+    ip = inodes.get(inode_no);
+    inodes.lock(ip);
+
+    // 4. 初始化新 Inode 的元数据
+    ip->entry.major = major;
+    ip->entry.minor = minor;
+    ip->entry.num_links = 1; // 默认有一个来自父目录的链接
+
+    // 5. 如果是目录，进行特殊处理
+    if (type == INODE_DIRECTORY) {
+        dp->entry.num_links++;       // 父目录的链接数+1 (因为有 '..')
+        ip->entry.num_links++;       // 新目录的链接数+1 (因为有 '.')
+
+        // 在新目录中创建 '.' (指向自己)
+        if (inodes.insert(ctx, ip, ".", inode_no) == (usize)-1) {
+            goto fail_creation;
+        }
+        // 在新目录中创建 '..' (指向父目录)
+        if (inodes.insert(ctx, ip, "..", dp->inode_no) == (usize)-1) {
+            goto fail_creation;
         }
     }
 
-    inodes.sync(ctx, new_inode, true);
-
-    if (inodes.insert(ctx, parent_dir, file_name, new_inode->inode_no) == (usize)(-1))
-    {
-        printk("Error: Failed to insert inode into parent directory\n");
+    // 6. 将新 Inode 链接到父目录中
+    if (inodes.insert(ctx, dp, name, inode_no) == (usize)-1) {
+        goto fail_creation;
     }
+    
+    // 7. 将所有变更（父目录和新inode）同步到磁盘
+    if (type == INODE_DIRECTORY) {
+        inodes.sync(ctx, dp, true);
+    }
+    inodes.sync(ctx, ip, true);
 
-    inodes.unlock(parent_dir);
-    inodes.put(ctx, parent_dir);
-    return new_inode;
+    // 成功！
+    inodes.unlock(dp);
+    inodes.put(ctx, dp);
+
+    return ip; // 返回锁定的新 Inode，调用者负责解锁和释放
+
+// --- 错误处理的回滚逻辑 ---
+fail_creation:
+    printk("!!!!fail_creation\n");
+    // 如果创建过程中出错（例如插入 '.', '..' 或插入父目录失败）
+    // 我们需要撤销所有操作，就像这个 Inode 从未被分配过一样
+    ip->entry.num_links = 0;
+    inodes.sync(ctx, ip, true); // 将 num_links=0 写回，以便 inode_put 能回收它
+    inodes.unlock(ip);
+    inodes.put(ctx, ip);
+
+    if (type == INODE_DIRECTORY) {
+        // 如果是目录创建失败，还要把父目录的链接数减回来
+        dp->entry.num_links--;
+        inodes.sync(ctx, dp, true);
+    }
+    // fall through
+
+fail:
+    // 通用的失败路径，释放对父目录的锁定和引用
+    printk("!!!!fail\n");
+    inodes.unlock(dp);
+    inodes.put(ctx, dp);
+    return NULL;
+
     /* (Final) TODO END */
+    return 0;
 }
 
 define_syscall(openat, int dirfd, const char *path, int omode)
@@ -438,37 +491,39 @@ define_syscall(chdir, const char *path)
      * Change the cwd (current working dictionary) of current process to 'path'.
      * You may need to do some validations.
      */
+    
+    Inode *ip;
+    Proc *p=thisproc();
     OpContext ctx;
-    Proc *p = thisproc();
-    Inode *ip = NULL;
+    if (!user_strlen(path,256)){
+        return -1;
+    }
     bcache.begin_op(&ctx);
-
-    if ((ip = namei(path, &ctx)) == NULL)
-    {
+    if ((ip=namei(path,&ctx))==NULL){
         bcache.end_op(&ctx);
         return -1;
     }
     inodes.lock(ip);
-
-    if (ip->entry.type != INODE_DIRECTORY)
-    {
+    if (ip->entry.type!=INODE_DIRECTORY){
         inodes.unlock(ip);
-        inodes.put(&ctx, ip);
+        inodes.put(&ctx,ip);
         bcache.end_op(&ctx);
         return -1;
     }
     inodes.unlock(ip);
-    inodes.put(&ctx, p->cwd);
+    inodes.put(&ctx,p->cwd);
+    p->cwd=ip;
     bcache.end_op(&ctx);
-    p->cwd = ip;
     return 0;
     /* (Final) TODO END */
 }
 
 define_syscall(pipe2, int pipefd[2], int flags)
 {
+
     /* (Final) TODO BEGIN */
-    (void)pipefd; (void)flags;
-    return -1;
+    
     /* (Final) TODO END */
+    (void)pipefd; (void)flags;
+    return -1; // TODO: 实现 pipe2
 }

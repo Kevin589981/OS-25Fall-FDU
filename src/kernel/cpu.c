@@ -59,7 +59,7 @@ static struct timer hello_timer[4];
 
 static void hello(struct timer *t)
 {
-    printk("CPU %lld: living\n", cpuid());
+    // printk("CPU %lld: living\n", cpuid());
     t->data++;
     set_cpu_timer(&hello_timer[cpuid()]);
 }
@@ -97,8 +97,13 @@ void set_cpu_on()
 
 void set_cpu_off()
 {
-    if (!_arch_disable_trap()) 
+    if (!_arch_disable_trap()) {
+        printk("CPU %lld: failed to disable trap, halt\n", cpuid());
+        do{
+        }while(1);
         PANIC();
+    }
+        
     cpus[cpuid()].online = false;
     printk("CPU %lld: stopped\n", cpuid());
 }

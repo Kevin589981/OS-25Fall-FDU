@@ -5,52 +5,37 @@
 #include <string.h>
 #include <unistd.h>
 
-void cat(int fd)
-{
-    char buffer[4096];
-    ssize_t bytesRead;
-
-    while ((bytesRead = read(fd, buffer, sizeof(buffer))) > 0)
-    {
-        if (write(STDOUT_FILENO, buffer, bytesRead) != bytesRead)
-        {
-            fprintf(stderr, "Error: Failed to write to stdout\n");
-            exit(1);
-        }
-    }
-
-    if (bytesRead < 0)
-    {
-        fprintf(stderr, "Error: Failed to read from file descriptor\n");
-        exit(1);
-    }
-}
-
 int main(int argc, char *argv[])
 {
     /* (Final) TODO BEGIN */
-    int fd;
-    if (argc == 1)
-    {
-        cat(STDIN_FILENO);
+    if (argc != 2) {
+        fprintf(stderr, "Usage: cat <filename>\n");
+        return 1;
     }
-    else
-    {
-        for (int i = 1; i < argc; ++i)
-        {
-            if ((fd = open(argv[i], O_RDONLY)) < 0)
-            {
-                fprintf(stderr, "cat: cannot open %s: %s\n", argv[i], strerror(errno));
-                exit(1);
-            }
-            cat(fd);
-            if (close(fd) < 0)
-            {
-                fprintf(stderr, "cat: error closing file %s: %s\n", argv[i], strerror(errno));
-                exit(1);
-            }
+    
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "cat: cannot open %s\n", argv[1]);
+        return 1;
+    }
+    
+    char buf[512];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        if (write(STDOUT_FILENO, buf, n) != n) {
+            fprintf(stderr, "cat: write error\n");
+            close(fd);
+            return 1;
         }
     }
+    
+    if (n < 0) {
+        fprintf(stderr, "cat: read error\n");
+        close(fd);
+        return 1;
+    }
+    
+    close(fd);
     /* (Final) TODO END */
     return 0;
 }

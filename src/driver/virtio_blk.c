@@ -149,7 +149,7 @@ static void virtio_blk_intr()
         u8 *data_ptr = disk.virtq.info[d0].buf;
         if (data_ptr) {
             Buf *b = container_of(data_ptr, Buf, data[0]);
-            post_sem(&b->sem);
+            post_all_sem(&b->sem);
         }
 
         

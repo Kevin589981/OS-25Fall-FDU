@@ -735,50 +735,67 @@ static Inode* namex(const char* path,
                     bool nameiparent,
                     char* name,
                     OpContext* ctx) {
-    /* (Final) TODO BEGIN */
     Inode *ip, *next;
 
-    if (*path == '/') ip = inodes.root;
-    else ip = inodes.share(thisproc()->cwd);
+    // 1. 初始化 ip
+    if (*path == '/') {
+        // [FIX] 关键修正：必须调用 share 增加引用计数
+        // 因为后续流程不管是出错 put 还是移交给 next，都会消耗一个引用
+        ip = inodes.share(inodes.root);
+    } else {
+        ip = inodes.share(thisproc()->cwd);
+    }
 
+    // 2. 逐级解析路径
     while ((path = skipelem(path, name)) != 0)
     {
         inodes.lock(ip);
+        
+        // 路径中间经过的必须是目录
         if (ip->entry.type != INODE_DIRECTORY)
         {
             inodes.unlock(ip);
-            inodes.put(ctx, ip);
+            inodes.put(ctx, ip); // 释放当前持有
             return NULL;
         }
 
+        // 处理 nameiparent 逻辑
+        // 如果是要找父目录，且当前已经解析到了最后一个元素（path耗尽）
+        // 那么当前的 ip 就是我们要找的父目录
         if (nameiparent && *path == '\0')
         {
             inodes.unlock(ip);
-            return ip;
+            return ip; // 返回 ip，引用计数所有权移交给调用者
         }
 
+        // 查找下一级 inode 编号
         usize inode_no = inodes.lookup(ip, name, NULL);
         if (inode_no == 0)
         {
             inodes.unlock(ip);
-            inodes.put(ctx, ip);
+            inodes.put(ctx, ip); // 没找到，释放当前持有并返回
             return NULL;
         }
 
+        // 获取下一级 inode (next 引用计数 +1)
         next = inodes.get(inode_no);
+        
         inodes.unlock(ip);
-        inodes.put(ctx, ip);
-        ip = next;
+        inodes.put(ctx, ip); // 释放上一级目录的引用
+        ip = next;           // 指针推进
     }
 
+    // 3. 处理 nameiparent 的特殊边界情况
+    // 只有当 path 一开始就是 "/" (导致循环没执行) 或空字符串时会走到这里。
+    // 如果想要找根目录的 parent，这是不存在的（或者不允许的操作），应返回 NULL。
     if (nameiparent)
     {
-        inodes.put(ctx, ip);
+        inodes.put(ctx, ip); // [重要] 这里必须释放 ip，因为我们返回 NULL，调用者不会负责释放
         return NULL;
     }
 
+    // 返回最终找到的 inode
     return ip;
-    /* (Final) TODO END */
 }
 
 Inode* namei(const char* path, OpContext* ctx) {
