@@ -164,48 +164,65 @@ void kinit() {
 // static int times=0;
 void* kalloc_page() {
     acquire_spinlock(&VMM_lock);
-    increment_rc(&kalloc_page_cnt);
-    // printk("allocate a new page\n");
     
-    if (free_page_list==NULL){
-        // if (times==0)printk("Great Error. First time failed.\n");
-        decrement_rc(&kalloc_page_cnt);
-        printk("Pages have been used out.\n");
+    if (free_page_list == NULL) {
         release_spinlock(&VMM_lock);
+        printk("Pages have been used out.\n");
         return NULL;
     }
-    // times+=1;
-    //此时不应当出现free_page_list为空的情况，因为还有空页表
-    ListNode *temp_node=free_page_list;
-    // 接受返回的前一个节点（可能为空）
-    free_page_list=_detach_from_list(temp_node);
+
+    ListNode *temp_node = free_page_list;
+    // 必须更新全局链表头
+    free_page_list = _detach_from_list(temp_node);
     
+    // 更新全局统计
+    free_page_count--;
+    increment_rc(&kalloc_page_cnt); // 这是您定义的全局分配总数统计
+
     release_spinlock(&VMM_lock);
 
-    memset(temp_node,0 ,PAGE_SIZE);
-    
-    // //计算出页号
-    // 没有必要在这里增加引用计数，在kalloc和kfree里改就可以了
-    // //usize this_page_number=(temp_node-page_infos)/PAGE_SIZE;
-    // //(page_info *)temp_node
-    return temp_node;
+    // 计算索引并更新 page_info 中的引用计数
+    usize page_info_idx = ((usize)temp_node - VMM_START) / PAGE_SIZE;
+    if (page_info_idx < page_count) {
+        // 分配出去的页，引用计数初始设为 1
+        init_rc(&page_infos[page_info_idx].page_ref_count);
+        increment_rc(&page_infos[page_info_idx].page_ref_count);
+        // 同时清理该页对应的 pool_header 状态，防止旧数据干扰
+        memset(&page_infos[page_info_idx].pool_header, 0, sizeof(PagePoolHeader));
+    }
 
+    memset(temp_node, 0, PAGE_SIZE);
+    return (void*)temp_node;
 }
-
 void kfree_page(void* p) {
-    if (p==NULL){
-        printk("A NULL POINTER.");
+    if (p == NULL) {
+        printk("kfree_page: A NULL POINTER.\n");
         return;
     }
-    acquire_spinlock(&VMM_lock);
-    decrement_rc(&kalloc_page_cnt);
-    // printk("free page\n");
-    
-    _insert_into_list(free_page_list, (ListNode *)p);
-    release_spinlock(&VMM_lock);
-    return;
-}
 
+    // 1. 计算索引
+    usize page_info_idx = ((usize)p - VMM_START) / PAGE_SIZE;
+    if (page_info_idx >= page_count) {
+        printk("kfree_page: Invalid page address %p\n", p);
+        return;
+    }
+
+    // 2. 递减引用计数
+    // 注意：decrement_rc 应当返回递减后的值
+    int ref = decrement_rc(&page_infos[page_info_idx].page_ref_count);
+
+    // 3. 只有引用计数归零，才真正回收进入空闲链表
+    if (ref <= 0) {
+        acquire_spinlock(&VMM_lock);
+        
+        // 确保放回链表
+        free_page_list = _insert_into_list(free_page_list, (ListNode *)p);
+        free_page_count++;
+        decrement_rc(&kalloc_page_cnt);
+        
+        release_spinlock(&VMM_lock);
+    }
+}
 
 void kalloc_pools_init() {
     for (int i = 0; i < (int)POOL_COUNT; i++) {
