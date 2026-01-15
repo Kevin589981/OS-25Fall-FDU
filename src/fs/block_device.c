@@ -72,7 +72,7 @@ void init_block_device() {
     printk("init_block_device: reading superblock from sector %llu\n", (u64)superblock_sector);
     sd_read(superblock_sector - FS_PART_LBA_BASE, sblock_data);
     printk("init_block_device: superblock loaded\n");
- 
+    
     // #ifdef PRINT_BLOCK_DEVICE_LOG
     // // 调试：打印 SuperBlock 信息
     // const SuperBlock *sb = (const SuperBlock *)sblock_data;
