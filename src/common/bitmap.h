@@ -21,7 +21,14 @@ typedef u64 BitmapCell;
 #define Bitmap(name, size) BitmapCell name[BITMAP_TO_NUM_CELLS(size)]
 
 // initialize a bitmap with `size` bits. All bits are cleared.
-void init_bitmap(BitmapCell *bitmap, usize size);
+void init_bitmap(BitmapCell *bitmap, usize size)
+{
+    usize num_cells = BITMAP_TO_NUM_CELLS(size);
+    for (usize i = 0; i < num_cells; i++)
+    {
+        bitmap[i] = 0;
+    }
+}
 
 // get the bit at `index`.
 static INLINE bool bitmap_get(BitmapCell *bitmap, usize index)

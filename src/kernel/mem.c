@@ -8,6 +8,7 @@
 #include <common/string.h>
 
 RefCount kalloc_page_cnt;
+static void *zero_page = NULL;
 
 // 前向声明 PagePoolHeader 结构体，以便在 page_info 中使用
 struct PagePoolHeader;
@@ -139,6 +140,11 @@ void kinit() {
     usize memory_size_byte = (user_end_link - (usize)user_start_link);
     printk("Available memory size is %llu bytes.\n", memory_size_byte);
 
+    // 初始化zero_page
+    zero_page = user_start_link;
+    memset(zero_page, 0, PAGE_SIZE);
+    user_start_link = (void*)((usize)user_start_link + PAGE_SIZE);
+
     // page_infos是全局数组，无需动态分配
     // // !操作系统内存很大，这个表会占用多页，不能先写kalloc_page，用kalloc_page分配导致页数不够
     memset(page_infos, 0, sizeof(page_infos));
@@ -199,6 +205,7 @@ void kfree_page(void* p) {
         printk("kfree_page: A NULL POINTER.\n");
         return;
     }
+    if (p == zero_page) return;
 
     // 1. 计算索引
     usize page_info_idx = ((usize)p - VMM_START) / PAGE_SIZE;
@@ -208,11 +215,10 @@ void kfree_page(void* p) {
     }
 
     // 2. 递减引用计数
-    // 注意：decrement_rc 应当返回递减后的值
-    int ref = decrement_rc(&page_infos[page_info_idx].page_ref_count);
+    bool should_free = decrement_rc(&page_infos[page_info_idx].page_ref_count);
 
     // 3. 只有引用计数归零，才真正回收进入空闲链表
-    if (ref <= 0) {
+    if (should_free) {
         acquire_spinlock(&VMM_lock);
         
         // 确保放回链表
@@ -281,7 +287,7 @@ static PagePoolHeader* grow_pool(int pool_idx) {
 /**
  * 成功则返回指向用户数据区的指针，失败则返回NULL
  */
-void* kalloc(usize size) {
+void* kalloc(unsigned long long size) {
     // 不会等于0，也不会超过PAGE_SIZE/2，所以应该不会进入这里
     if (size == 0 || size > POOL_MAX_SIZE) {
         printk("kalloc: Invalid or unsupported size %llu\n", size);
@@ -393,6 +399,13 @@ void kfree(void* ptr) {
     usize page_info_idx = ((usize)page_addr - VMM_START) / PAGE_SIZE;
     PagePoolHeader* page_header = &page_infos[page_info_idx].pool_header;
 
+    // 检查是否是整页分配（obj_size == 0 表示这是kalloc_page分配的）
+    if (page_header->obj_size == 0) {
+        // 整页分配应该用kfree_page释放，但为了兼容，这里直接调用
+        kfree_page(page_addr);
+        return;
+    }
+
     // 从配置信息中获取对象大小，并遍历配置表找到对应的内存池
     int pool_idx = -1;
     for (int i = 0; i < (int)POOL_COUNT; i++) {
@@ -459,9 +472,7 @@ void kfree(void* ptr) {
 }
 
 void* get_zero_page() {
-    // TODO: 实现零页共享机制
-    // 暂时返回NULL，在需要时分配新页
-    return NULL;
+    return zero_page;
 }
 
 void kshare_page(u64 addr)
