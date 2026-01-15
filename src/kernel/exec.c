@@ -282,7 +282,8 @@ extern int fdalloc(struct file *f);
 #define USER_STACK_SIZE  (8 * PAGE_SIZE)
 
 int execve(const char *path, char *const argv[], char *const envp[])
-{
+{   
+    printk("execve: path=%s\n", path);
     Elf64_Ehdr ehdr;
     Elf64_Phdr phdr;
     Inode *ip = NULL;
