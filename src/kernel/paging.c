@@ -13,9 +13,15 @@
 #include <kernel/sched.h>
 
 
+void init_section(Section *sec)
+{
+    memset(sec, 0, sizeof(Section));
+    init_list_node(&sec->stnode);
+}
+
 void init_sections(ListNode *section_head) {
     /* (Final) TODO BEGIN */
-
+    init_list_node(section_head);
     /* (Final) TODO END */
 }
 
@@ -38,12 +44,13 @@ u64 sbrk(i64 size) {
 
     
     /* (Final) TODO END */
+    return 0;
 }
 
 int pgfault_handler(u64 iss) {
-    Proc *p = thisproc();
-    struct pgdir *pd = &p->pgdir;
-    u64 addr =
+    Proc *p __attribute__((unused)) = thisproc();
+    struct pgdir *pd __attribute__((unused)) = &p->pgdir;
+    u64 addr __attribute__((unused)) =
             arch_get_far(); // Attempting to access this address caused the page fault
 
     /** 
@@ -56,6 +63,7 @@ int pgfault_handler(u64 iss) {
      */
 
     /* (Final) TODO END */
+    return -1;
 }
 
 void copy_sections(ListNode *from_head, ListNode *to_head)

@@ -2,6 +2,7 @@
 #include <common/string.h>
 #include <kernel/mem.h>
 #include <kernel/pt.h>
+#include <kernel/printk.h>
 
 PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc)
 {
@@ -127,7 +128,15 @@ void attach_pgdir(struct pgdir *pgdir)
 void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
 {
     /* (Final) TODO BEGIN */
-
+    u64 pa = (u64)K2P(ka);
+    PTEntriesPtr pte = get_pte(pd, va, true);
+    if (!pte)
+    {
+        printk("vmmap: get_pte failed\n");
+        return;
+    }
+    *pte = PAGE_BASE(pa) | flags;
+    arch_tlbi_vmalle1is();
     /* (Final) TODO END */
 }
 
@@ -139,6 +148,27 @@ void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
 int copyout(struct pgdir *pd, void *va, void *p, usize len)
 {
     /* (Final) TODO BEGIN */
+    usize total_copied = 0;
+    while (total_copied < len)
+    {
+        PTEntriesPtr pte = get_pte(pd, (u64)va, true);
+        if (*pte == NULL)
+        {
+            void *new_page = kalloc_page();
+            *pte = K2P(new_page) | PTE_USER_DATA;
+        }
 
+        usize copy_size = MIN(len - total_copied, PAGE_SIZE - VA_OFFSET(va));
+        void *dst = (void *)(P2K(PTE_ADDRESS(*pte)) + VA_OFFSET(va));
+        memcpy(dst, p, copy_size);
+
+        total_copied += copy_size;
+        p += copy_size;
+        va += copy_size;
+    }
+    if (total_copied == len)
+        return 0;
+    else
+        return -1;
     /* (Final) TODO END */
 }

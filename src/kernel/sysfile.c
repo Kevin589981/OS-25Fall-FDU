@@ -37,7 +37,9 @@ struct iovec {
 static struct file *fd2file(int fd)
 {
     /* (Final) TODO BEGIN */
-    
+    struct oftable *oft = &thisproc()->oftable;
+    if (fd < 0 || fd >= NOFILE) return NULL;
+    return oft->ofiles[fd];
     /* (Final) TODO END */
 }
 
@@ -48,7 +50,15 @@ static struct file *fd2file(int fd)
 int fdalloc(struct file *f)
 {
     /* (Final) TODO BEGIN */
-    
+    Proc* p = thisproc();
+    for (int fd = 0; fd < NOFILE; fd++)
+    {
+        if (p->oftable.ofiles[fd] == 0)
+        {
+            p->oftable.ofiles[fd] = f;
+            return fd;
+        }
+    }
     /* (Final) TODO END */
     return -1;
 }
@@ -66,14 +76,16 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
                int offset)
 {
     /* (Final) TODO BEGIN */
-    
+    (void)addr; (void)length; (void)prot; (void)flags; (void)fd; (void)offset;
+    return -1;
     /* (Final) TODO END */
 }
 
 define_syscall(munmap, void *addr, size_t length)
 {
     /* (Final) TODO BEGIN */
-    
+    (void)addr; (void)length;
+    return -1;
     /* (Final) TODO END */
 }
 
@@ -123,7 +135,10 @@ define_syscall(writev, int fd, struct iovec *iov, int iovcnt)
 define_syscall(close, int fd)
 {
     /* (Final) TODO BEGIN */
-    
+    struct file *f = fd2file(fd);
+    if (!f) return -1;
+    file_close(f);
+    thisproc()->oftable.ofiles[fd] = NULL;
     /* (Final) TODO END */
     return 0;
 }
@@ -261,9 +276,58 @@ Inode *create(const char *path, short type, short major, short minor,
               OpContext *ctx)
 {
     /* (Final) TODO BEGIN */
-    
+    Inode *new_inode, *parent_dir;
+    char file_name[FILE_NAME_MAX_LENGTH];
+
+    if ((parent_dir = nameiparent(path, file_name, ctx)) == NULL) return NULL;
+
+    inodes.lock(parent_dir);
+    usize inode_no;
+    if ((inode_no = inodes.lookup(parent_dir, file_name, 0)))
+    {
+        inodes.unlock(parent_dir);
+        inodes.put(ctx, parent_dir);
+        new_inode = inodes.get(inode_no);
+        inodes.lock(new_inode);
+        if (type == INODE_REGULAR && new_inode->entry.type == INODE_REGULAR) return new_inode;
+        // ERROR
+        inodes.unlock(new_inode);
+        inodes.put(ctx, new_inode);
+        return NULL;
+    }
+
+    inode_no = inodes.alloc(ctx, type);
+    new_inode = inodes.get(inode_no);
+    inodes.lock(new_inode);
+
+    new_inode->entry.type = type;
+    new_inode->entry.major = major;
+    new_inode->entry.minor = minor;
+    new_inode->entry.num_links = 1;
+
+    if (type == INODE_DIRECTORY)
+    {
+        parent_dir->entry.num_links++;
+        inodes.sync(ctx, parent_dir, true);
+
+        if (inodes.insert(ctx, new_inode, ".", inode_no) == (usize)(-1) ||
+            inodes.insert(ctx, new_inode, "..", parent_dir->inode_no) == (usize)(-1))
+        {
+            printk("Error: Failed to create '.' and '..'\n");
+        }
+    }
+
+    inodes.sync(ctx, new_inode, true);
+
+    if (inodes.insert(ctx, parent_dir, file_name, new_inode->inode_no) == (usize)(-1))
+    {
+        printk("Error: Failed to insert inode into parent directory\n");
+    }
+
+    inodes.unlock(parent_dir);
+    inodes.put(ctx, parent_dir);
+    return new_inode;
     /* (Final) TODO END */
-    return 0;
 }
 
 define_syscall(openat, int dirfd, const char *path, int omode)
@@ -374,14 +438,37 @@ define_syscall(chdir, const char *path)
      * Change the cwd (current working dictionary) of current process to 'path'.
      * You may need to do some validations.
      */
-    
+    OpContext ctx;
+    Proc *p = thisproc();
+    Inode *ip = NULL;
+    bcache.begin_op(&ctx);
+
+    if ((ip = namei(path, &ctx)) == NULL)
+    {
+        bcache.end_op(&ctx);
+        return -1;
+    }
+    inodes.lock(ip);
+
+    if (ip->entry.type != INODE_DIRECTORY)
+    {
+        inodes.unlock(ip);
+        inodes.put(&ctx, ip);
+        bcache.end_op(&ctx);
+        return -1;
+    }
+    inodes.unlock(ip);
+    inodes.put(&ctx, p->cwd);
+    bcache.end_op(&ctx);
+    p->cwd = ip;
+    return 0;
     /* (Final) TODO END */
 }
 
 define_syscall(pipe2, int pipefd[2], int flags)
 {
-
     /* (Final) TODO BEGIN */
-    
+    (void)pipefd; (void)flags;
+    return -1;
     /* (Final) TODO END */
 }

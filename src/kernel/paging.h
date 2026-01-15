@@ -7,6 +7,7 @@
 #define ST_SWAP (1 << 1)
 #define ST_RO (1 << 2)
 #define ST_HEAP (1 << 3)
+#define ST_USTACK (1 << 4)
 #define ST_TEXT (ST_FILE | ST_RO)
 #define ST_DATA ST_FILE
 #define ST_BSS ST_FILE
@@ -23,6 +24,10 @@ struct section {
     u64 offset; // Offset in file
     u64 length; // Length of mapped content in file
 };
+
+typedef struct section Section;
+
+void init_section(Section *);
 
 int pgfault_handler(u64 iss);
 void init_sections(ListNode *section_head);

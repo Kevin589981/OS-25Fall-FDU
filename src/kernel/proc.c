@@ -438,27 +438,80 @@ int kill(int pid)
  * Sets up stack to return as if from system call.
  */
 void trap_return();
-int fork()
-{
-    /**
-     * (Final) TODO BEGIN
-     * 
-     * 1. Create a new child process.
-     * 2. Copy the parent's memory space.
-     * 3. Copy the parent's trapframe.
-     * 4. Set the parent of the new proc to the parent of the parent.
-     * 5. Set the state of the new proc to RUNNABLE.
-     * 6. Activate the new proc and return its pid.
-     */
 
-    /* (Final) TODO END */
+Proc* create_child_proc(Proc *parent_proc)
+{
+    Proc *child_proc = create_proc();
+    acquire_spinlock(&global_process_lock);
+    child_proc->parent = parent_proc;
+    _insert_into_list(&parent_proc->children, &child_proc->ptnode);
+    release_spinlock(&global_process_lock);
+    return child_proc;
 }
 
-/*
- * Create a new process copying p as the parent.
- * Sets up stack to return as if from system call.
- */
-void trap_return();
+void copy_page_directory(Proc *parent_proc, Proc *child_proc)
+{
+    acquire_spinlock(&parent_proc->pgdir.lock);
+    ListNode *sections_head = &parent_proc->pgdir.section_head;
+
+    _for_in_list(section_node, sections_head)
+    {
+        if (section_node == sections_head) continue;
+        
+        Section *sec = container_of(section_node, Section, stnode);
+        Section *new_sec = (Section *)kalloc(sizeof(Section));
+        init_section(new_sec);
+        new_sec->begin = sec->begin;
+        new_sec->end = sec->end;
+        new_sec->flags = sec->flags;
+
+        if (sec->fp)
+        {
+            new_sec->fp = file_dup(sec->fp);
+            new_sec->offset = sec->offset;
+            new_sec->length = sec->length;
+        }
+        _insert_into_list(&child_proc->pgdir.section_head, &new_sec->stnode);
+
+        for (u64 va = PAGE_BASE(sec->begin); va < sec->end; va += PAGE_SIZE)
+        {
+            PTEntriesPtr pte = get_pte(&parent_proc->pgdir, va, false);
+            if (pte && (*pte & PTE_VALID))
+            {
+                *pte |= PTE_RO;
+                vmmap(&child_proc->pgdir, va, (void *)P2K(PTE_ADDRESS(*pte)), PTE_FLAGS(*pte));
+                kshare_page(P2K(PTE_ADDRESS(*pte)));
+            }
+        }
+    }
+    release_spinlock(&parent_proc->pgdir.lock);
+}
+
+void copy_file_table(Proc *parent_proc, Proc *child_proc)
+{
+    memset((void *)&child_proc->oftable, 0, sizeof(struct oftable));
+    for (int i = 0; i < NOFILE; i++)
+    {
+        if (parent_proc->oftable.ofiles[i])
+        {
+            child_proc->oftable.ofiles[i] = file_dup(parent_proc->oftable.ofiles[i]);
+        }
+        else break;
+    }
+}
+
+void copy_working_directory(Proc *parent_proc, Proc *child_proc)
+{
+    if (child_proc->cwd != parent_proc->cwd)
+    {
+        OpContext ctx;
+        bcache.begin_op(&ctx);
+        inodes.put(&ctx, child_proc->cwd);
+        bcache.end_op(&ctx);
+        child_proc->cwd = inodes.share(parent_proc->cwd);
+    }
+}
+
 int fork()
 {
     /**
@@ -467,10 +520,18 @@ int fork()
      * 1. Create a new child process.
      * 2. Copy the parent's memory space.
      * 3. Copy the parent's trapframe.
-     * 4. Set the parent of the new proc to the parent of the parent.
+     * 4. Set the parent of the new proc to current proc.
      * 5. Set the state of the new proc to RUNNABLE.
      * 6. Activate the new proc and return its pid.
      */
-
+    Proc *parent_proc = thisproc();
+    Proc *child_proc = create_child_proc(parent_proc);
+    memcpy((void *)child_proc->ucontext, (void *)parent_proc->ucontext, sizeof(UserContext));
+    child_proc->ucontext->x[0] = 0;
+    copy_page_directory(parent_proc, child_proc);
+    copy_file_table(parent_proc, child_proc);
+    copy_working_directory(parent_proc, child_proc);
+    start_proc(child_proc, trap_return, 0);
+    return child_proc->pid;
     /* (Final) TODO END */
 }

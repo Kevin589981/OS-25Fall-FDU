@@ -11,9 +11,10 @@
 enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, DEEPSLEEPING, ZOMBIE };
 
 typedef struct UserContext {
-    u64 sp, useless;
-    u64 spsr, elr;
-    u64 x[18];
+    u64 q0[2];          // SIMD/FP 寄存器 q0 (16字节，最后压栈，在栈底部/最低地址)
+    u64 spsr, elr;      // spsr_el1, elr_el1
+    u64 sp, tpidr;      // sp_el0, tpidr_el0
+    u64 x[32];          // x0-x30，其中x30压了两次，共32个u64
 } UserContext;
 
 typedef struct KernelContext {

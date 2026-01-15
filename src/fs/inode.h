@@ -4,6 +4,7 @@
 #include <common/spinlock.h>
 #include <fs/cache.h>
 #include <fs/defines.h>
+#include <sys/stat.h>
 
 /**
     @brief 根 inode 的编号（即 `/` 的 inode_no）。

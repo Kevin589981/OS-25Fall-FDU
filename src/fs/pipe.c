@@ -30,6 +30,7 @@ int pipe_alloc(File **f0, File **f1)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1;
 }
 
 void pipe_close(Pipe *pi, int writable)
@@ -37,6 +38,7 @@ void pipe_close(Pipe *pi, int writable)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return;
 }
 
 int pipe_write(Pipe *pi, u64 addr, int n)
@@ -44,6 +46,7 @@ int pipe_write(Pipe *pi, u64 addr, int n)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1;
 }
 
 int pipe_read(Pipe *pi, u64 addr, int n)
@@ -51,4 +54,5 @@ int pipe_read(Pipe *pi, u64 addr, int n)
     /* (Final) TODO BEGIN */
 
     /* (Final) TODO END */
+    return -1;
 }

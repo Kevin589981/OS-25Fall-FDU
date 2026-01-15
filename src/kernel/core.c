@@ -4,10 +4,22 @@
 #include <kernel/sched.h>
 #include <test/test.h>
 #include <common/buf.h>
+#include <common/string.h>
 #include <kernel/core.h>
+#include <kernel/mem.h>
+#include <kernel/paging.h>
 #include <driver/virtio.h>
+
+#define INIT_ELR 0x400000
+#define INIT_SP 0x80000000
+#define INIT_SPSR 0x0
+#define INIT_SIZE ((u64)eicode - (u64)icode)
+
+u32 LBA;
 volatile bool panic_flag;
 extern int virtio_blk_rw(Buf *b);
+extern char icode[], eicode[];
+void trap_return();
 NO_RETURN void idle_entry()
 {
     set_cpu_on();
@@ -26,9 +38,18 @@ NO_RETURN void idle_entry()
 
 NO_RETURN void kernel_entry()
 {
-    init_filesystem();
-
     printk("Hello world! (Core %lld)\n", cpuid());
+
+    /* LAB 4 TODO 3 BEGIN */
+    Buf b;
+    b.flags = 0;
+    b.block_no = (u32)0x0;
+    virtio_blk_rw(&b);
+    u8 *data = b.data;
+    LBA = *(int *)(data + 0x1CE + 0x8);
+    /* LAB 4 TODO 3 END */
+    
+    init_filesystem();
     // proc_test();
     // vm_test();
     // user_proc_test();
@@ -72,7 +93,36 @@ NO_RETURN void kernel_entry()
      * Map init.S to user space and trap_return to run icode.
      */
 
+    Proc *init_proc = create_proc();
+    init_proc->ucontext->x[0] = 0;
+    init_proc->ucontext->elr = INIT_ELR;
+    init_proc->ucontext->spsr = INIT_SPSR;
+    init_proc->ucontext->sp = INIT_SP;
 
+    Section *sec = (Section *)kalloc(sizeof(Section));
+    init_section(sec);
+    if (!sec) PANIC();
+    sec->flags = ST_TEXT;
+    sec->begin = INIT_ELR;
+    sec->end = INIT_ELR + INIT_SIZE;
+
+    _insert_into_list(&init_proc->pgdir.section_head, &sec->stnode);
+
+    void *p = kalloc_page();
+    if (!p) PANIC();
+    memset(p, 0, PAGE_SIZE);
+    memcpy(p, (void*)icode, PAGE_SIZE);
+    vmmap(&init_proc->pgdir, INIT_ELR, p, PTE_USER_DATA | PTE_RO);
+    start_proc(init_proc, trap_return, 0);
+    printk("Create process %d\n", init_proc->pid);
+
+    while (1)
+    {
+        int a;
+        a = wait(&a);
+    }
+
+    PANIC();
     /* (Final) TODO END */
 }
 

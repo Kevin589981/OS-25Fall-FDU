@@ -440,6 +440,23 @@ void kfree(void* ptr) {
     release_spinlock(&page_header->lock);
     release_spinlock(&pool->global_lock);
 }
+
 void* get_zero_page() {
+    // TODO: 实现零页共享机制
+    // 暂时返回NULL，在需要时分配新页
     return NULL;
+}
+
+void kshare_page(u64 addr)
+{
+    // 根据地址计算page_info索引
+    usize page_info_idx = ((usize)PAGE_BASE(addr) - VMM_START) / PAGE_SIZE;
+    if (page_info_idx < TOTAL_PHYS_PAGES) {
+        increment_rc(&page_infos[page_info_idx].page_ref_count);
+    }
+}
+
+u64 left_page_cnt()
+{
+    return free_page_count;
 }

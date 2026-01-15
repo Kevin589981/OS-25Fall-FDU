@@ -2,7 +2,8 @@
 #include <fs/inode.h>
 #include <kernel/mem.h>
 #include <kernel/printk.h>
-
+#include <kernel/console.h>
+#include <kernel/sched.h>
 /**
     @brief the private reference to the super block.
 
@@ -392,6 +393,10 @@ static usize inode_map(OpContext* ctx,
 
 // see `inode.h`.
 static usize inode_read(Inode* inode, u8* dest, usize offset, usize count) {
+    if (inode->entry.type == INODE_DEVICE)
+    {
+        return console_read(inode, (char *)dest, count);
+    }
     InodeEntry* entry = &inode->entry;
     if (count + offset > entry->num_bytes)
         count = entry->num_bytes - offset;
@@ -433,6 +438,10 @@ static usize inode_write(OpContext* ctx,
                          u8* src,
                          usize offset,
                          usize count) {
+    if(inode->entry.type == INODE_DEVICE)
+    {
+        return console_write(inode, (char *)src, count);
+    }
     InodeEntry* entry = &inode->entry;
     usize end = offset + count;
     ASSERT(offset <= entry->num_bytes);
@@ -727,9 +736,49 @@ static Inode* namex(const char* path,
                     char* name,
                     OpContext* ctx) {
     /* (Final) TODO BEGIN */
-    
+    Inode *ip, *next;
+
+    if (*path == '/') ip = inodes.root;
+    else ip = inodes.share(thisproc()->cwd);
+
+    while ((path = skipelem(path, name)) != 0)
+    {
+        inodes.lock(ip);
+        if (ip->entry.type != INODE_DIRECTORY)
+        {
+            inodes.unlock(ip);
+            inodes.put(ctx, ip);
+            return NULL;
+        }
+
+        if (nameiparent && *path == '\0')
+        {
+            inodes.unlock(ip);
+            return ip;
+        }
+
+        usize inode_no = inodes.lookup(ip, name, NULL);
+        if (inode_no == 0)
+        {
+            inodes.unlock(ip);
+            inodes.put(ctx, ip);
+            return NULL;
+        }
+
+        next = inodes.get(inode_no);
+        inodes.unlock(ip);
+        inodes.put(ctx, ip);
+        ip = next;
+    }
+
+    if (nameiparent)
+    {
+        inodes.put(ctx, ip);
+        return NULL;
+    }
+
+    return ip;
     /* (Final) TODO END */
-    return 0;
 }
 
 Inode* namei(const char* path, OpContext* ctx) {

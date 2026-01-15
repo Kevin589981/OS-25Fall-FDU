@@ -2,6 +2,8 @@
 #include <fs/block_device.h>
 #include <common/string.h>
 
+extern u32 LBA;
+
 /**
     @brief a simple implementation of reading a block from SD card.
 
@@ -10,7 +12,7 @@
  */
 static void sd_read(usize block_no, u8 *buffer) {
     Buf b;
-    b.block_no = (u32)block_no;
+    b.block_no = (u32)block_no + LBA;
     b.flags = 0;
     virtio_blk_rw(&b);
     memcpy(buffer, b.data, BLOCK_SIZE);
@@ -24,7 +26,7 @@ static void sd_read(usize block_no, u8 *buffer) {
  */
 static void sd_write(usize block_no, u8 *buffer) {
     Buf b;
-    b.block_no = (u32)block_no;
+    b.block_no = (u32)block_no + LBA;
     b.flags = B_DIRTY | B_VALID;
     memcpy(b.data, buffer, BLOCK_SIZE);
     virtio_blk_rw(&b);
@@ -44,6 +46,7 @@ static u8 sblock_data[BLOCK_SIZE];
 BlockDevice block_device;
 
 void init_block_device() {
+    sd_read(1, sblock_data);
     block_device.read = sd_read;
     block_device.write = sd_write;
 }
