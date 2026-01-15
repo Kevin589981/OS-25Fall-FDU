@@ -5,7 +5,7 @@
 #include <kernel/printk.h>
 #include <kernel/sched.h>
 #include <driver/gicv3.h>
-
+#include <fs/cache.h>
 static InterruptHandler int_handler[NUM_IRQ_TYPES];
 
 static void default_handler(u32 intid)
@@ -37,7 +37,9 @@ void interrupt_global_handler()
     }
 
     gic_eoi(iar);
-
+    // if (intid == VIRTIO_BLK_IRQ){
+    //     printk("interrupt_global_handler: received VIRTIO_BLK_IRQ\n");
+    // }
     if (int_handler[intid])
         int_handler[intid](intid);
 }

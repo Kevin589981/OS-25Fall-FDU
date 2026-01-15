@@ -18,7 +18,7 @@ struct section {
     ListNode stnode;
 
     /* The following fields are for the file-backed sections. */
-
+    // char const *name;
     struct file *fp;
     u64 offset; // Offset in file
     u64 length; // Length of mapped content in file
@@ -26,6 +26,8 @@ struct section {
 
 int pgfault_handler(u64 iss);
 void init_sections(ListNode *section_head);
+// struct section *add_section(ListNode *section_head, u64 begin, u64 end,
+//                             u64 flags, u64 offset, u64 length, const char *name);
 void free_sections(struct pgdir *pd);
 void copy_sections(ListNode *from_head, ListNode *to_head);
 u64 sbrk(i64 size);

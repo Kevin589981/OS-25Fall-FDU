@@ -385,6 +385,7 @@ NO_RETURN void exit(int code)
         printk("BUG at proc.c :325\n");
         PANIC();
     }
+    free_sections(&p->pgdir);
     free_pgdir(&p->pgdir);
     post_sem(&p->parent->childexit);
 
@@ -460,6 +461,7 @@ int fork()
     if (child==NULL){
         return -1;
     }
+    printk("fork: created child process pid=%d\n",child->pid);
     //!!! ?失败怎么办
     copy_sections(&parent->pgdir.section_head, &child->pgdir.section_head);
     *(child->ucontext)=*(parent->ucontext);
@@ -472,16 +474,16 @@ int fork()
         }
     }
     child->cwd=inodes.share(parent->cwd);
-    acquire_spinlock(&global_process_lock);
-    child->parent=parent;
-    _insert_into_list(parent->children.prev, &child->ptnode);
-    release_spinlock(&global_process_lock);
+    // acquire_spinlock(&global_process_lock);
+    // child->parent=parent;
+    // _insert_into_list(parent->children.prev, &child->ptnode);
+    // release_spinlock(&global_process_lock);
 
-    child->kcontext->lr=(u64)&trap_return;
-    child->kcontext->x0=(u64)(child->ucontext);
+    // child->kcontext->lr=(u64)&trap_return;
+    // child->kcontext->x0=(u64)(child->ucontext);
     // acquire_spinlock(&child->lock);
-    
-    activate_proc(child);
+    start_proc(child, trap_return, 0);
+    // activate_proc(child);
     return child->pid;
     /* (Final) TODO END */
 }

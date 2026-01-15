@@ -66,7 +66,11 @@ static void free_desc(struct virtq *virtq, u16 n)
         virtq->desc[n].next = virtq->free_head;
     virtq->free_head = head;
 }
-
+static inline u64 __get_daif(void) {
+    u64 daif;
+    asm volatile("mrs %0, daif" : "=r"(daif));
+    return daif;
+}
 int virtio_blk_rw(Buf *b)
 {
     enum diskop op = DREAD;
@@ -89,7 +93,7 @@ int virtio_blk_rw(Buf *b)
         return -1;
     hdr.reserved = 0;
     hdr.sector = sector;
-    printk("acquire spinlock disk.lk\n");
+    // printk("acquire spinlock disk.lk\n");
     acquire_spinlock(&disk.lk);
     // printk("84\n");
     // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
@@ -127,14 +131,72 @@ int virtio_blk_rw(Buf *b)
 
     arch_fence();
     REG(VIRTIO_REG_QUEUE_NOTIFY) = 0;
+    // if (sector==133185){
+    //     printk("virtio_blk_rw: submitted request for sector 133185\n");
+    // }
     arch_fence();
-    printk("virtio_blk_rw: request submitted, waiting for completion\n");
+    // printk("virtio_blk_rw: request submitted, waiting for completion\n");
+
+    // printk("buf is %llx(136)\n",(u64)b);
     /* LAB 4 TODO 1 BEGIN */
     release_spinlock(&disk.lk);
-    printk("virtio_bk.c:wait sem\n");
+    // printk("virtio_bk.c:wait sem\n");
     unalertable_wait_sem(&b->sem);
+    //     printk("virtio_blk_rw: waiting, polling INTERRUPT_STATUS...\n");
+    // for (int i = 0; i < 100000; i++) {
+    //     u32 int_status = REG(VIRTIO_REG_INTERRUPT_STATUS);
+    //     if (int_status != 0) {
+    //         printk("virtio_blk_rw: INTERRUPT_STATUS = 0x%x after %d loops\n", 
+    //                int_status, i);
+    //         printk("virtio_blk_rw: used->idx = %u, last_used = %u\n",
+    //                disk.virtq.used->idx, disk.virtq.last_used_idx);
+    //         break;
+    //     }
+    //     if (i % 10000 == 0) {
+    //         printk("virtio_blk_rw: still waiting... loop %d\n", i);
+    //     }
+    // }
+    // ========== 完整诊断 ==========
+// printk("===== VIRTIO DIAG before wait =====\n");
+// printk("  Current CPU: %lld\n", cpuid());
+
+
+// // 检查 IRQ 是否被禁用 (I 位是 bit 7)
+// #define IRQ_DISABLED() ((__get_daif() >> 7) & 1)
+// printk("  DAIF: 0x%llx (IRQ %s)\n", 
+//        __get_daif(), IRQ_DISABLED() ? "DISABLED" : "enabled");
+// printk("  avail->idx: %u\n", disk.virtq.avail->idx);
+// printk("  avail->flags: 0x%x\n", disk.virtq.avail->flags);
+// printk("  used->idx: %u\n", disk.virtq.used->idx);
+// printk("  used->flags: 0x%x\n", disk.virtq.used->flags);
+// printk("  last_used_idx: %u\n", disk.virtq.last_used_idx);
+// printk("  INTERRUPT_STATUS: 0x%x\n", REG(VIRTIO_REG_INTERRUPT_STATUS));
+// printk("  VIRTIO_STATUS: 0x%x\n", REG(VIRTIO_REG_STATUS));
+// printk("=====================================\n");
+
+// // 等待一小段时间后再检查
+// for (volatile int i = 0; i < 1000000; i++);
+
+// printk("===== VIRTIO DIAG after delay =====\n");
+// printk("  used->idx: %u\n", disk.virtq.used->idx);
+// printk("  INTERRUPT_STATUS: 0x%x\n", REG(VIRTIO_REG_INTERRUPT_STATUS));
+// printk("=====================================\n");
+// // ================================
+// asm volatile("msr daifclr, #2" ::: "memory");
+    // asm volatile("msr daifclr, #2" ::: "memory");
+    // printk("virtio_bk.c:wait sem\n");
+    // if (wait_sem(&b->sem)){};
     printk("virtio_bk.c:sem get\n");
     acquire_spinlock(&disk.lk);
+    // _lock_sem(&b->sem);
+    // while (!disk.virtq.info[d0].done) {
+    //     release_spinlock(&disk.lk);
+    //     if(!_wait_sem(&b->sem, true)){
+    //         return -1;
+    //     }
+    //     //_lock_sem(&b->sem);
+    //     acquire_spinlock(&disk.lk);
+    // }
     /* LAB 4 TODO 1 END */
 
     disk.virtq.info[d0].done = 0;
@@ -145,19 +207,19 @@ int virtio_blk_rw(Buf *b)
 // 中断，触发唤醒对应的进程
 static void virtio_blk_intr()
 {
-    printk("virtio_blk_intr: interrupt received\n");
+    // printk("virtio_blk_intr: interrupt received\n");
     acquire_spinlock(&disk.lk);
 
     u32 intr_status = REG(VIRTIO_REG_INTERRUPT_STATUS);
     REG(VIRTIO_REG_INTERRUPT_ACK) = intr_status & 0x3;
-    printk("virtio_blk_intr: intr_status=%x\n", intr_status);
+    // printk("virtio_blk_intr: intr_status=%x\n", intr_status);
 
     int d0;
     while (disk.virtq.last_used_idx != disk.virtq.used->idx) {
-        printk("virtio_blk_intr: processing used ring entry\n");
+        // printk("virtio_blk_intr: processing used ring entry\n");
         d0 = disk.virtq.used->ring[disk.virtq.last_used_idx % NQUEUE].id;
         if (disk.virtq.info[d0].status != 0) {
-            printk("virtio_blk_intr: ERROR status=%d\n", disk.virtq.info[d0].status);
+            // printk("virtio_blk_intr: ERROR status=%d\n", disk.virtq.info[d0].status);
             PANIC();
         }
 
@@ -165,8 +227,9 @@ static void virtio_blk_intr()
         u8 *data_ptr = disk.virtq.info[d0].buf;
         if (data_ptr) {
             Buf *b = container_of(data_ptr, Buf, data[0]);
-            printk("virtio_blk_intr: posting semaphore\n");
-            post_sem(&b->sem);
+            // printk("virtio_blk_intr: posting semaphore\n");
+            // printk("buf is %llx(184)\n",(u64)b);
+            post_all_sem(&b->sem);
         }
 
         
@@ -176,7 +239,7 @@ static void virtio_blk_intr()
         disk.virtq.last_used_idx++;
     }
 
-    printk("virtio_blk_intr: done\n");
+    // printk("virtio_blk_intr: done\n");
     release_spinlock(&disk.lk);
 }
 

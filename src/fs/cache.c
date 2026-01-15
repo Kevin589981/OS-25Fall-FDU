@@ -10,6 +10,11 @@
     #define printk(...) do { } while(0)
 #endif
 
+// ============ 中断状态检测宏 ============
+#include <kernel/printk.h>
+
+
+
 #include <kernel/proc.h>
 static int num_cached_blocks=0;
 /**
@@ -114,10 +119,14 @@ static usize get_num_cached_blocks() {
     return n;
 }
 
+int note=0;
+
 // see `cache.h`.
 static Block *cache_acquire(usize block_no) {
     // TODO
+    // printk("!!!important\n");
     acquire_spinlock(&lock);
+    // printk("acquire cache lock.\n");
     Block *b=NULL;
 
     _for_in_list(this_node, &head){
@@ -131,7 +140,14 @@ static Block *cache_acquire(usize block_no) {
             _insert_into_list(&head,this_node);
             b->acquired=TRUE;
             release_spinlock(&lock);
-            unalertable_acquire_sleeplock(&b->lock);
+            // unalertable_acquire_sleeplock(&b->lock);
+            if (acquire_sleeplock(&b->lock)){
+
+            }
+            if (b->block_no==93){
+                printk("acquired block 93.\n");
+            }
+            printk("acquiring cache:147, block no is %lld.\n",b->block_no);
             return b;
         }
 
@@ -165,13 +181,19 @@ static Block *cache_acquire(usize block_no) {
     b->pinned=FALSE;
     _insert_into_list(&head, &b->node);
     release_spinlock(&lock);
-    unalertable_acquire_sleeplock(&b->lock);
+    // unalertable_acquire_sleeplock(&b->lock);
+    if (acquire_sleeplock(&b->lock)){
+
+    };
     printk("acquiring cache.\n");
+    // CHECK_IRQ();
     if (!b->valid){
+        note=1;
+        printk("cache miss, reading from device.\n");
         device_read(b);
         b->valid=TRUE;
     }
-
+    printk("acquired cache:193.\n");
     return b;
 }
 
@@ -181,8 +203,8 @@ static void cache_release(Block *block) {
     acquire_spinlock(&lock);
     block->acquired=FALSE;
     release_spinlock(&lock);
-    post_all_sem(&block->lock);
-    // release_sleeplock(&block->lock);
+    // post_all_sem(&block->lock);
+    release_sleeplock(&block->lock);
 }
 
 // see `cache.h`.

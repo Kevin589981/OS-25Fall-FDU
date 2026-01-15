@@ -85,9 +85,10 @@ bool user_readable(const void *start, usize size) {
 bool user_writeable(const void *start, usize size) {
     /* (Final) TODO Begin */
     Proc *p = thisproc();
-    if (p==NULL||size==0){
+    if (p == NULL)
+        return false;
+    if (size == 0)
         return true;
-    }
     struct pgdir *pgdir = &p->pgdir;
     u64 va = (u64)start;
     u64 end_va = va + size;

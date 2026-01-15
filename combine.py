@@ -52,16 +52,16 @@ def merge_files(file_paths, output_path, line_number_style="per_file", path_disp
             else:
                 print(f"文件 {file_path} 不存在，跳过。")
 
-if __name__ == "__main__":
-    # 定义要合并的文件路径
-    files_to_merge = [
-        r"96.0%code/data_collector.py",
-        r"96.0%code/train_full_trajectory.py",
-        r"96.0%code/eval_full_trajectory.py",
-    ]
+# if __name__ == "__main__":
+#     # 定义要合并的文件路径
+#     files_to_merge = [
+#         r"96.0%code/data_collector.py",
+#         r"96.0%code/train_full_trajectory.py",
+#         r"96.0%code/eval_full_trajectory.py",
+#     ]
 
-    # 定义输出文件路径
-    output_file = "merged_output.txt"
+#     # 定义输出文件路径
+#     output_file = "merged_output.txt"
 
     # 调用函数：path_display_mode 可选 "filename"（仅文件名）或 "fullpath"（完整路径）
     # 示例1：仅显示文件名（默认）
@@ -72,8 +72,8 @@ if __name__ == "__main__":
     # 定义要合并的文件路径
     files_to_merge = [
         # "src/kernel/sched.c",
-        "src/kernel/proc.h",
-        "src/kernel/proc.c",
+        # "src/kernel/proc.h",
+        # "src/kernel/proc.c",
         # "src/kernel/cpu.h",
         # "src/kernel/cpu.c",
         # "src/kernel/pt.c",
@@ -85,14 +85,18 @@ if __name__ == "__main__":
         # "src/driver/virtio_blk.c",
         # "src/common/sem.h",
         # "src/common/buf.h"
-
+        # "src/fs/block_device.c",
         # "src/kernel/syscall.c",
-        "src/aarch64/trap.S",
+        # "src/aarch64/trap.c",
         # "src/test/user_proc_test.c",
         # "src/user/loop.S"
         # "src/fs/file.c",
         # "src/fs/file.h",
-        # "src/kernel/proc.h"
+        # "src/kernel/proc.h",
+        "src/fs/block_device.c",
+        "src/kernel/paging.c",
+        "src/kernel/exec.c",
+        "src/kernel/core.c"
     ]
     
     # 定义输出文件路径

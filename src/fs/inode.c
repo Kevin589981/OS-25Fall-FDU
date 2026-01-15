@@ -121,6 +121,8 @@ static void inode_lock(Inode* inode) {
     ASSERT(acquire_sleeplock(&inode->lock));
     if (!inode->valid) {
         // 读出数据，inode自动变成有效的
+        printk("Loading inode %llu from disk.\n", inode->inode_no);
+        // CHECK_IRQ();
         inode_sync(NULL, inode, false);
     }
 
@@ -137,6 +139,8 @@ static void inode_unlock(Inode* inode) {
 static void inode_sync(OpContext* ctx, Inode* inode, bool do_write) {
     // TODO
     usize block_no=to_block_no(inode->inode_no);
+    printk("Syncing inode: %llu, do_write=%d\n", inode->inode_no, do_write);
+    // CHECK_IRQ();
     Block *block=cache->acquire(block_no);
     InodeEntry *entry=get_entry(block, inode->inode_no);
 
@@ -417,8 +421,14 @@ static usize inode_read(Inode* inode, u8* dest, usize offset, usize count) {
             memset(current_dest,0,bytes_to_copy);
         }else{
             Block *block=cache->acquire(block_no);
+            if (block_no==93){
+                printk("cpu: %lld, inode.c:reading block 93.\n",cpuid());
+            }
             memcpy(current_dest,block->data+off_in_block,bytes_to_copy);
             cache->release(block);
+            if (block_no==93){
+                printk("cpu: %lld, inode.c:release block 93.\n",cpuid());
+            }
         }
         total_read+=bytes_to_copy;
         current_off+=bytes_to_copy;
@@ -737,7 +747,10 @@ static Inode* namex(const char* path,
         inode=inodes.share(thisproc()->cwd);
     }
     while ((path=skipelem(path,name))!=NULL){
+        printk("namex: processing '%s'\n",name);
+        // CHECK_IRQ();
         inodes.lock(inode);
+        printk("namex: locked inode %llu\n",inode->inode_no);
         if (nameiparent&&*path=='\0'){
             inodes.unlock(inode);
             return inode;

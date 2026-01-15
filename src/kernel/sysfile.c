@@ -357,6 +357,7 @@ Inode *create(const char *path, short type, short major, short minor,
 
 // --- 错误处理的回滚逻辑 ---
 fail_creation:
+    printk("!!!!fail_creation\n");
     // 如果创建过程中出错（例如插入 '.', '..' 或插入父目录失败）
     // 我们需要撤销所有操作，就像这个 Inode 从未被分配过一样
     ip->entry.num_links = 0;
@@ -373,6 +374,7 @@ fail_creation:
 
 fail:
     // 通用的失败路径，释放对父目录的锁定和引用
+    printk("!!!!fail\n");
     inodes.unlock(dp);
     inodes.put(ctx, dp);
     return NULL;

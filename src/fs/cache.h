@@ -3,6 +3,41 @@
 #include <common/sem.h>
 #include <fs/block_device.h>
 #include <fs/defines.h>
+// 读取 DAIF 寄存器
+static inline u64 __get_daif(void) {
+    u64 daif;
+    asm volatile("mrs %0, daif" : "=r"(daif));
+    return daif;
+}
+
+// 检查 IRQ 是否被禁用 (I 位是 bit 7)
+#define IRQ_DISABLED() ((__get_daif() >> 7) & 1)
+
+// 打印中断状态的宏，显示文件名、行号、函数名
+#define CHECK_IRQ() do { \
+    u64 __daif = __get_daif(); \
+    printk("[IRQ CHECK] %s:%d (%s): DAIF=0x%llx, IRQ %s\n", \
+           __FILE__, __LINE__, __func__, \
+           __daif, \
+           ((__daif >> 7) & 1) ? "DISABLED !!!" : "enabled"); \
+} while(0)
+
+// 简化版本，只在中断被禁用时打印（减少输出噪音）
+#define CHECK_IRQ_WARN() do { \
+    if (IRQ_DISABLED()) { \
+        printk("[IRQ WARN] %s:%d (%s): IRQ DISABLED!\n", \
+               __FILE__, __LINE__, __func__); \
+    } \
+} while(0)
+
+// 断言中断必须开启，否则 panic
+#define ASSERT_IRQ_ENABLED() do { \
+    if (IRQ_DISABLED()) { \
+        printk("[IRQ PANIC] %s:%d (%s): IRQ should be enabled but DISABLED!\n", \
+               __FILE__, __LINE__, __func__); \
+        PANIC(); \
+    } \
+} while(0)
 
 /**
     @brief 一个原子操作可以持有的不同块的最大数量。

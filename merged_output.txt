@@ -1,579 +1,717 @@
-# src/kernel/proc.h
+# src/fs/block_device.c
 
-     1  | #pragma once
+     1  | #define PRINT_BLOCK_DEVICE_LOG 1
      2  | 
-     3  | #include <common/defines.h>
-     4  | #include <common/list.h>
-     5  | #include <common/sem.h>
-     6  | #include <common/rbtree.h>
-     7  | #include <kernel/pt.h>
-     8  | #include <fs/file.h>
-     9  | #include <fs/inode.h>
-    10  | 
-    11  | enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, DEEPSLEEPING, ZOMBIE };
-    12  | 
-    13  | typedef struct UserContext {
-    14  |     u64 sp, useless;
-    15  |     u64 spsr, elr;
-    16  |     u64 x[18];
-    17  | } UserContext;
-    18  | 
-    19  | typedef struct KernelContext {
-    20  |     u64 lr, x0, x1;
-    21  |     u64 x[11];
-    22  | } KernelContext;
-    23  | 
-    24  | // embeded data for procs
-    25  | struct schinfo {
-    26  |     u64 vruntime;
-    27  |     struct rb_node_ node;  // 改为红黑树节点
-    28  |     int nice;              // -20 到 19
-    29  |     u64 start_exec_time;
-    30  | };
-    31  | 
-    32  | extern int prio_to_weight[];
-    33  | #define WEIGHT(priority) prio_to_weight[priority+20]
-    34  | #define NICE_0_LOAD 1024
+     3  | #include <driver/virtio.h>
+     4  | #include <fs/block_device.h>
+     5  | #include <common/string.h>
+     6  | #ifdef PRINT_BLOCK_DEVICE_LOG
+     7  |     #include <kernel/printk.h>
+     8  | #else
+     9  |     #define printk(...) do { } while(0)
+    10  | #endif
+    11  | 
+    12  | // static const usize FS_PART_LBA_BASE = 133120;
+    13  | usize FS_PART_LBA_BASE=0;
+    14  | /**
+    15  |     @brief a simple implementation of reading a block from SD card.
+    16  | 
+    17  |     @param[in] block_no the block number to read
+    18  |     @param[out] buffer the buffer to store the data
+    19  |  */
+    20  | static void sd_read(usize block_no, u8 *buffer) {
+    21  |     usize phys_block = block_no + FS_PART_LBA_BASE;
+    22  |     printk("sd_read: reading block %lld (phys %lld)\n", (u64)block_no, (u64)phys_block);
+    23  |     Buf b;
+    24  |     b.block_no = (u32)phys_block;
+    25  |     b.flags = 0;
+    26  |     printk("sd_read: calling virtio_blk_rw\n");
+    27  |     virtio_blk_rw(&b);
+    28  |     printk("sd_read: virtio_blk_rw returned\n");
+    29  |     memcpy(buffer, b.data, BLOCK_SIZE);
+    30  |     printk("sd_read: completed\n");
+    31  | }
+    32  | 
+    33  | /**
+    34  |     @brief a simple implementation of writing a block to SD card.
     35  | 
-    36  | typedef struct Proc {
-    37  |     bool killed;
-    38  |     bool idle;
-    39  |     int pid;
-    40  |     int exitcode;
-    41  |     enum procstate state;
-    42  |     Semaphore childexit;
-    43  |     ListNode children;
-    44  |     ListNode ptnode;
-    45  |     struct Proc *parent;
-    46  |     struct schinfo schinfo;
-    47  |     struct pgdir pgdir;
-    48  |     void *kstack;
-    49  |     UserContext *ucontext;
-    50  |     KernelContext *kcontext;
-    51  |     struct oftable oftable;
-    52  |     Inode *cwd;
-    53  |     SpinLock lock;
-    54  | } Proc;
-    55  | 
-    56  | void init_kproc();
-    57  | void init_proc(Proc *);
-    58  | WARN_RESULT Proc *create_proc();
-    59  | int start_proc(Proc *, void (*entry)(u64), u64 arg);
-    60  | NO_RETURN void exit(int code);
-    61  | WARN_RESULT int wait(int *exitcode);
-    62  | WARN_RESULT int kill(int pid);
-    63  | WARN_RESULT int fork();
-    64  | 
-    65  | 
-    66  | #define MAX_PID 4096 // 定义系统支持的最大PID数量，可以根据需求调整
-    67  | #define BITS_PER_LONG (sizeof(unsigned long) * 8)
-    68  | #define BITMAP_SIZE (MAX_PID / BITS_PER_LONG)
-    69  | 
-    70  | // 全局PID位图
-    71  | extern unsigned long pid_bitmap[BITMAP_SIZE];
-================================================================================
-# src/kernel/proc.c
-
-     1  | #include <kernel/proc.h>
-     2  | #include <kernel/mem.h>
-     3  | #include <kernel/sched.h>
-     4  | #include <aarch64/mmu.h>
-     5  | #include <common/list.h>
-     6  | #include <common/string.h>
-     7  | #include <kernel/printk.h>
-     8  | #include <kernel/debug.h>
-     9  | #include <kernel/core.h>
-    10  | #include <kernel/cpu.h>
-    11  | #ifndef NCPU
-    12  | #define NCPU 4
-    13  | #endif
-    14  | #include <kernel/paging.h>
-    15  | 
-    16  | Proc root_proc;
-    17  | 
-    18  | void kernel_entry();
-    19  | u64 proc_entry();
-    20  | 
-    21  | SpinLock global_process_lock;
-    22  | int prio_to_weight[40]={
-    23  |     /* -20 */     88761,     71755,     56483,     46273,     36291,
-    24  |     /* -15 */     29154,     23254,     18705,     14949,     11916,
-    25  |     /* -10 */      9548,      7620,      6100,      4904,      3906,
-    26  |     /*  -5 */      3121,      2501,      1991,      1586,      1277,
-    27  |     /*   0 */      1024,       820,       655,       526,       423,
-    28  |     /*   5 */       335,       272,       215,       172,       137,
-    29  |     /*  10 */       110,        87,        70,        56,        45,
-    30  |     /*  15 */        36,        29,        23,        18,        15,
-    31  | }; 
-    32  | // unsigned long pid_bitmap[BITMAP_SIZE];
-    33  | 
-    34  | // // 用于记录下一次开始搜索空闲PID的位置，以提高效率
-    35  | // static int next_pid_to_check = 0;
-    36  | 
-    37  | // // 初始化PID分配器
-    38  | // void init_pid_allocator() {
-    39  | //     // 初始化位图，将所有位清零，表示所有PID都未被分配
-    40  | //     memset(pid_bitmap, 0, sizeof(pid_bitmap));
-    41  | //     next_pid_to_check = 0;
-    42  | //     // 保留PID 0
-    43  | //     // set_bit(0, pid_bitmap);
-    44  | // }
-    45  | 
-    46  | // // 回收一个PID
-    47  | // void pid_recycler(int pid) {
-    48  | //     if (pid < 0 || pid >= MAX_PID) {
-    49  | //         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
-    50  | //         return;
-    51  | //     }
+    36  |     @param[in] block_no the block number to write
+    37  |     @param[in] buffer the buffer to store the data
+    38  |  */
+    39  | static void sd_write(usize block_no, u8 *buffer) {
+    40  |     Buf b;
+    41  |     b.block_no = (u32)(block_no + FS_PART_LBA_BASE);
+    42  |     b.flags = B_DIRTY | B_VALID;
+    43  |     memcpy(b.data, buffer, BLOCK_SIZE);
+    44  |     virtio_blk_rw(&b);
+    45  | }
+    46  | 
+    47  | /**
+    48  |     @brief the in-memory copy of the super block.
+    49  | 
+    50  |     We may need to read the super block multiple times, so keep a copy of it in
+    51  |     memory.
     52  | 
-    53  | // #ifdef PID_DEBUG
-    54  | //     printk("Recycling PID: %d\n", pid);
-    55  | // #endif
-    56  | 
-    57  | //     // 使用原子操作或在锁保护下清除对应位
-    58  | //     // 这里我们假设它会在 global_process_lock 的保护下被调用
-    59  | //     int index = pid / BITS_PER_LONG;
-    60  | //     int offset = pid % BITS_PER_LONG;
-    61  | //     pid_bitmap[index] &= ~(1UL << offset);
-    62  | // }
-    63  | 
-    64  | // // 分配一个PID
-    65  | // int pid_allocator() {
-    66  | //     // 假设此函数总是在 global_process_lock 保护下调用
-    67  |     
-    68  | //     // 从上次检查的位置开始循环查找
-    69  | //     for (int i = 0; i < MAX_PID; ++i) {
-    70  | //         int pid = (next_pid_to_check + i) % MAX_PID;
-    71  | //         if (pid == 0) continue; // 跳过PID 0
-    72  | 
-    73  | //         int index = pid / BITS_PER_LONG;
-    74  | //         int offset = pid % BITS_PER_LONG;
-    75  | 
-    76  | //         // 检查该位是否为0 (未被占用)
-    77  | //         if (!(pid_bitmap[index] & (1UL << offset))) {
-    78  | //             // 标记该位为1 (已占用)
-    79  | //             pid_bitmap[index] |= (1UL << offset);
-    80  |             
-    81  | //             // 更新下一次开始搜索的位置
-    82  | //             next_pid_to_check = pid + 1;
-    83  | //             if (next_pid_to_check >= MAX_PID) {
-    84  | //                 next_pid_to_check = 1; // 回到开头
-    85  | //             }
-    86  |             
-    87  | //             return pid;
-    88  | //         }
-    89  | //     }
-    90  | 
-    91  | //     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
-    92  | //     return -1; // 返回错误码
-    93  | // }
-    94  | unsigned long pid_bitmap[BITMAP_SIZE];
-    95  | 
-    96  | // 用于记录下一次开始搜索空闲PID的位置，以提高效率
-    97  | static int next_pid_to_check = 1;
-    98  | 
-    99  | // 初始化PID分配器
-   100  | void init_pid_allocator() {
-   101  |     // 初始化位图，将所有位清零，表示所有PID都未被分配
-   102  |     memset(pid_bitmap, 0, sizeof(pid_bitmap));
-   103  |     next_pid_to_check = 1;
-   104  |     pid_bitmap[0] |= 1UL; 
-   105  | }
-   106  | 
-   107  | // 回收一个PID (此函数已是O(1)，无需修改)
-   108  | void pid_recycler(int pid) {
-   109  |     if (pid <= 0 || pid >= MAX_PID) {
-   110  |         printk("WARNING: Attempted to recycle invalid PID %d.\n", pid);
-   111  |         return;
-   112  |     }
-   113  | 
-   114  | #ifdef PID_DEBUG
-   115  |     printk("Recycling PID: %d\n", pid);
-   116  | #endif
-   117  | 
-   118  |     int index = pid / BITS_PER_LONG;
-   119  |     int offset = pid % BITS_PER_LONG;
-   120  |     pid_bitmap[index] &= ~(1UL << offset);
-   121  | }
-   122  | 
-   123  | //==============================================================================
-   124  | //           分配一个PID (使用 AArch64 内联汇编优化)
-   125  | //==============================================================================
-   126  | int pid_allocator() {
-   127  |     // 假设此函数总是在锁保护下调用
-   128  | 
-   129  |     // 从上次检查的字开始，遍历整个位图
-   130  |     usize start_index = (next_pid_to_check / BITS_PER_LONG) % BITMAP_SIZE;
-   131  | 
-   132  |     for (usize i = 0; i < BITMAP_SIZE; ++i) {
-   133  |         int index = (start_index + i) % BITMAP_SIZE;
-   134  |         unsigned long word = pid_bitmap[index];
-   135  | 
-   136  |         // 优化: 如果这个字的所有位都已设置 (全满)，则快速跳过。
-   137  |         if (word == ~0UL) {
-   138  |             continue;
-   139  |         }
-   140  | 
-   141  |         // 找到了一个不满的字，现在使用硬件指令来快速找到第一个0位。
-   142  |         unsigned long inverted_word = ~word;
-   143  |         unsigned long offset;
-   144  | 
-   145  |         // 使用AArch64内联汇编计算尾随零的数量(Count Trailing Zeros)
-   146  |         // 相当于找到 inverted_word 中第一个为1的位的索引
-   147  |         asm volatile (
-   148  |             "rbit %0, %1\n\t"  // 1. 将位的顺序颠倒
-   149  |             "clz  %0, %0\n\t"  // 2. 计算颠倒后数字的前导零数量
-   150  |             : "=r" (offset)    // 输出: offset ('='表示写入, 'r'表示通用寄存器)
-   151  |             : "r" (inverted_word) // 输入: inverted_word ('r'表示通用寄存器)
-   152  |         );
-   153  | 
-   154  |         // 计算最终的PID
-   155  |         int pid = index * BITS_PER_LONG + offset;
-   156  | 
-   157  |         // 边界检查: 确保计算出的PID没有超过最大限制
-   158  |         // 这在最后一个字不是完整填充的情况下很重要
-   159  |         if (pid >= MAX_PID) {
-   160  |             continue; // 继续搜索下一个可能的字
-   161  |         }
-   162  |         
-   163  |         // 找到了一个有效的、空闲的PID
-   164  | 
-   165  |         // 标记该位为1 (已占用)
-   166  |         pid_bitmap[index] |= (1UL << offset);
-   167  | 
-   168  |         // 更新下一次开始搜索的位置，以实现轮转效果
-   169  |         next_pid_to_check = pid + 1;
-   170  |         if (next_pid_to_check >= MAX_PID) {
-   171  |             next_pid_to_check = 1; // 回到开头 (跳过PID 0)
-   172  |         }
-   173  | 
-   174  |         return pid;
-   175  |     }
-   176  | 
-   177  |     // 如果循环一圈都没有找到空闲PID，说明PID已耗尽
-   178  |     return -1; // 返回错误码
-   179  | }
-   180  | 
-   181  | 
-   182  | 
-   183  | 
-   184  | Proc idle_procs[NCPU];
-   185  | 
-   186  | void init_kproc()
-   187  | {
-   188  |     init_spinlock(&global_process_lock);
-   189  |     init_pid_allocator();
-   190  |     
-   191  |     // 2. init the root_proc (finished)
-   192  | 
-   193  |     init_proc(&root_proc);
-   194  |     root_proc.parent = &root_proc;
-   195  |     start_proc(&root_proc, kernel_entry, 123456);
-   196  | }
-   197  | 
-   198  | void init_proc(Proc *p)
-   199  | {   
-   200  |     acquire_spinlock(&global_process_lock);
-   201  |     memset(p, 0, sizeof(Proc));
-   202  | 
-   203  |     init_sem(&p->childexit, 1);
-   204  |     init_list_node(&p->children);
-   205  |     init_list_node(&p->ptnode);
-   206  |     p->idle = FALSE;
-   207  |     p->exitcode = 0;
-   208  |     p->killed = FALSE;
-   209  |     p->parent = NULL;
-   210  |     p->pid = pid_allocator();
-   211  |     if (p->pid==-1){
-   212  |         kfree(p);
-   213  |         release_spinlock(&global_process_lock);
-   214  |         printk("PID used out\n");
-   215  |         PANIC();
-   216  |     }
-   217  |     init_pgdir(&p->pgdir);
-   218  |     p->state = UNUSED;
-   219  |     p->kstack = kalloc_page();
-   220  |     init_spinlock(&p->lock);
-   221  |     init_schinfo(&p->schinfo);
-   222  |     
-   223  |     if (p->kstack == NULL) {
-   224  |         PANIC();
-   225  |     }
-   226  |     memset(p->kstack, 0, PAGE_SIZE);
-   227  |     p->ucontext = (UserContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext));
-   228  |     p->kcontext = (KernelContext *)((u64)p->kstack + PAGE_SIZE - 16 - sizeof(UserContext)- sizeof(KernelContext));
-   229  |     
-   230  | 
-   231  |     release_spinlock(&global_process_lock);
-   232  | }
-   233  | 
-   234  | Proc *create_proc()
-   235  | {
-   236  |     Proc *p = kalloc(sizeof(Proc));
-   237  |     if (p==NULL){
-   238  |         PANIC();
-   239  |     }
-   240  |     init_proc(p);
-   241  |     return p;
-   242  | }
-   243  | 
-   244  | void set_parent_to_this(Proc *proc)
-   245  | {
-   246  |     acquire_spinlock(&global_process_lock);
-   247  |     Proc *parent=thisproc();
-   248  |     _detach_from_list(&proc->ptnode);
-   249  |     proc->parent=parent;
-   250  |     _insert_into_list(parent->children.prev,&proc->ptnode);
-   251  |     release_spinlock(&global_process_lock);
-   252  | }
-   253  | 
-   254  | int start_proc(Proc *p, void (*entry)(u64), u64 arg)
-   255  | {
-   256  |     // TODO:
-   257  |     // 1. set the parent to root_proc if NULL
-   258  |     acquire_spinlock(&global_process_lock);
-   259  |     if (p->parent==NULL){
-   260  |         
-   261  |         p->parent=&root_proc;
-   262  |         _detach_from_list(&p->ptnode);
-   263  |         _insert_into_list(root_proc.children.prev, &p->ptnode);
-   264  |         
-   265  |     }
-   266  |     
-   267  |     p->kcontext->lr=(u64)&proc_entry;
-   268  |     p->kcontext->x0=(u64)entry;
-   269  |     p->kcontext->x1=(u64)arg;
-   270  |     
-   271  |     p->state=UNUSED;
-   272  |     int id =p->pid;
-   273  |     activate_proc(p);//activate函数内部有锁
-   274  |     // NOTE: be careful of concurrency
-   275  | #ifdef PID_DEBUG
-   276  |     printk("cpuid: %lld, start pid: %d, its parent is %d\n",cpuid(),p->pid,p->parent->pid);
-   277  | #endif
-   278  |     release_spinlock(&global_process_lock);
-   279  |     return id;
-   280  | }
-   281  | 
-   282  | int wait(int *exitcode)
-   283  | {
-   284  |     while (1){
-   285  |         Proc *parent=thisproc();
-   286  |         acquire_spinlock(&global_process_lock);
-   287  |         
-   288  |         bool has_children = !_empty_list(&parent->children);
-   289  |         if (!has_children){
-   290  |             release_spinlock(&global_process_lock);
-   291  | #ifdef PID_DEBUG
-   292  |             printk("194: proc.c: no children, parent pid is %d\n",parent->pid);
-   293  | #endif
-   294  |             return -1;
-   295  |         }
-   296  | 
-   297  |         Proc *zombie_child=NULL;
-   298  |         _for_in_list(node, &parent->children) {
-   299  |             if (node==&parent->children){
-   300  |                 continue;
-   301  |             }
-   302  |             Proc *p = container_of(node, Proc, ptnode);
-   303  |             if (is_zombie(p)) {
-   304  |                 zombie_child = p;
-   305  | #ifdef PID_DEBUG
-   306  |                 printk("Found zombie child pid: %d\n", p->pid);
-   307  | #endif
-   308  |                 break;
-   309  |             }
-   310  |         }
-   311  |         
-   312  |         if (zombie_child){
-   313  |             if (exitcode!=NULL){
-   314  |                 *exitcode=zombie_child->exitcode;
-   315  |             }
-   316  |             int child_pid=zombie_child->pid;
-   317  |             pid_recycler(child_pid);
-   318  |             if (zombie_child->kstack){
-   319  |                 kfree_page(zombie_child->kstack);
-   320  |             }
-   321  |             _detach_from_list(&zombie_child->ptnode);
-   322  |             kfree(zombie_child);
-   323  |             release_spinlock(&global_process_lock);
-   324  |             return child_pid;
-   325  |         }
-   326  | 
-   327  |         release_spinlock(&global_process_lock);
-   328  |         if (!wait_sem(&parent->childexit)){
-   329  |             return -1;
-   330  |         }
-   331  |     }
-   332  | }
-   333  | 
-   334  | NO_RETURN void exit(int code)
-   335  | {
-   336  |     
-   337  |      
-   338  |         // TODO:
-   339  |     // 1. set the exitcode
-   340  |     // 2. clean up the resources
-   341  |     // 3. transfer children to the root_proc, and notify the root_proc if there is zombie
-   342  |     // 4. sched(ZOMBIE)
-   343  |     // NOTE: be careful of concurrency
-   344  | 
-   345  |     acquire_spinlock(&global_process_lock);
-   346  |     Proc *p=thisproc();
-   347  | #ifdef debug_sched
-   348  |     printk("proc.c:224, p->state is %d\n",p->state);
-   349  | #endif
-   350  |     p->exitcode=code;
-   351  |     
-   352  |     // 将所有子进程过继给root_proc
-   353  |     ListNode orphaned_children;
-   354  |     init_list_node(&orphaned_children);
-   355  |     while (!_empty_list(&p->children)) {
-   356  |         ListNode *child_node = p->children.next;
-   357  |         _detach_from_list(child_node);
-   358  |         _insert_into_list(orphaned_children.prev, child_node);
-   359  |     }
-   360  |     while (!_empty_list(&orphaned_children)) {
-   361  |         ListNode *child_node = orphaned_children.next;
-   362  |         _detach_from_list(child_node);
-   363  |         _insert_into_list(root_proc.children.prev, child_node);
-   364  |         Proc *child = container_of(child_node, Proc, ptnode);
-   365  |         child->parent = &root_proc;
-   366  |         if (is_zombie(child)) {
-   367  |             if ((u64)&root_proc<0x20){
-   368  |                 printk("Error proc.c: 312\n");
-   369  |             }
-   370  |             post_sem(&root_proc.childexit);
-   371  |         }
-   372  |     }
-   373  |     ASSERT(p->parent!=NULL);
-   374  |     if (!p->parent){
-   375  |         p->parent=&root_proc;
-   376  |         _detach_from_list(&p->ptnode);
-   377  |         _insert_into_list(root_proc.children.prev, &p->ptnode);
-   378  |     }
-   379  | 
-   380  |     if ((u64)p->parent<0x20){
-   381  |         printk("BUG at proc.c :325\n");
-   382  |         PANIC();
-   383  |     }
-   384  |     free_pgdir(&p->pgdir);
-   385  |     post_sem(&p->parent->childexit);
-   386  | 
-   387  |     // 不在此处获取调度锁，sched()函数会自己处理
-   388  |     acquire_sched_lock(); 
-   389  |     
-   390  |     // acquire_spinlock(&p->lock);
-   391  | 
-   392  |     release_spinlock(&global_process_lock);
-   393  |     
-   394  |     // printk("Ready to Enter zombie, Proc %d, cpu %lld\n",p->pid,cpuid());
-   395  |     sched(ZOMBIE);
-   396  |     printk("exit: sched(ZOMBIE) should not return");
-   397  |     PANIC();
-   398  | }
-   399  | 
-   400  | Proc *find_to_kill(int pid, Proc *parent){
-   401  |     if (parent->pid==pid){
-   402  |         if (parent->state==UNUSED){
-   403  |             return NULL;
-   404  |         }
-   405  |         return parent;
-   406  |     }
-   407  |     _for_in_list(node,&parent->children){
-   408  |         if (node==&parent->children)continue;
-   409  |         Proc *child=container_of(node, Proc, ptnode);
-   410  |         Proc *find=find_to_kill(pid, child);
-   411  |         if (find) return find;
-   412  |     }
-   413  |     return NULL;
-   414  | }
-   415  | 
-   416  | int kill(int pid)
-   417  | {
-   418  |     // TODO:
-   419  |     // Set the killed flag of the proc to true and return 0.
-   420  |     // Return -1 if the pid is invalid (proc not found).
-   421  |     acquire_spinlock(&global_process_lock);
-   422  |     // printk("try to kill %d\n",pid);
-   423  |     Proc *target=find_to_kill(pid, &root_proc);
-   424  |     // printk("find kill target %d\n",pid);
-   425  |     if (!target){
-   426  |         release_spinlock(&global_process_lock);
-   427  |         return -1;
-   428  |     }
-   429  |     target->killed=true;
-   430  |     alert_proc(target);
-   431  |     release_spinlock(&global_process_lock);
-   432  |     
-   433  |     return 0;
-   434  | }
-   435  | 
-   436  | /*
-   437  |  * Create a new process copying p as the parent.
-   438  |  * Sets up stack to return as if from system call.
-   439  |  */
-   440  | void trap_return();
-   441  | int fork()
-   442  | {
-   443  |     /**
-   444  |      * (Final) TODO BEGIN
-   445  |      * 
-   446  |      * 1. Create a new child process.
-   447  |      * 2. Copy the parent's memory space.
-   448  |      * 3. Copy the parent's trapframe.
-   449  |      * 4. Set the parent of the new proc to the parent of the parent.
-   450  |      * 5. Set the state of the new proc to RUNNABLE.
-   451  |      * 6. Activate the new proc and return its pid.
-   452  |      */
-   453  | 
-   454  |     /* (Final) TODO END */
-   455  | }
+    53  |     @note the super block, in our lab, is always read-only, so we don't need to
+    54  |     write it back.
+    55  |  */
+    56  | static u8 sblock_data[BLOCK_SIZE];
+    57  | 
+    58  | BlockDevice block_device;
+    59  | 
+    60  | void init_block_device() {
+    61  |     block_device.read = sd_read;
+    62  |     block_device.write = sd_write;
+    63  |     
+    64  |     // 读取 SuperBlock
+    65  |     // 文件系统在分区 2，起始扇区是 133120（见 MBR）
+    66  |     // SuperBlock 在分区内的块 1，所以绝对位置是 133120 + 1 = 133121
+    67  |     // usize superblock_sector = 133120 + 1;
+    68  |     // printk("init_block_device: reading superblock from sector %llu\n", (u64)superblock_sector);
+    69  |     // sd_read(superblock_sector, sblock_data);
+    70  |     // printk("init_block_device: superblock loaded\n");
+    71  |     usize superblock_sector = FS_PART_LBA_BASE + 1;
+    72  |     printk("init_block_device: reading superblock from sector %llu\n", (u64)superblock_sector);
+    73  |     sd_read(superblock_sector - FS_PART_LBA_BASE, sblock_data);
+    74  |     printk("init_block_device: superblock loaded\n");
+    75  |     
+    76  |     // #ifdef PRINT_BLOCK_DEVICE_LOG
+    77  |     // // 调试：打印 SuperBlock 信息
+    78  |     // const SuperBlock *sb = (const SuperBlock *)sblock_data;
+    79  |     // printk("SuperBlock info: num_blocks=%u, num_inodes=%u, inode_start=%u\n",
+    80  |     //        sb->num_blocks, sb->num_inodes, sb->inode_start);
+    81  |     // #endif
+    82  | }
+    83  | 
+    84  | const SuperBlock *get_super_block() { return (const SuperBlock *)sblock_data; }
 ================================================================================
-# src/aarch64/trap.S
+# src/kernel/paging.c
 
-     1  | #define pushp(a, b) stp a, b, [sp, #-0x10]!
-     2  | #define popp(a, b) ldp a, b, [sp], #0x10 
-     3  | 
-     4  | /* `exception_vector.S` send all traps here. */
-     5  | .global trap_entry
-     6  | trap_entry:
-     7  | // TODO: save UserContext
-     8  | pushp(x16,x17)
-     9  | pushp(x14,x15)
-    10  | pushp(x12,x13)
-    11  | pushp(x10,x11)
-    12  | pushp(x8,x9)
-    13  | pushp(x6,x7)
-    14  | pushp(x4,x5)
-    15  | pushp(x2,x3)
-    16  | pushp(x0,x1)
-    17  | mrs x1,elr_el1
-    18  | mrs x0,spsr_el1
-    19  | pushp(x0,x1)
-    20  | mrs x0,sp_el0
-    21  | pushp(x0, xzr)
-    22  | mov x0,sp //UserContext指针
-    23  | bl trap_global_handler
-    24  |  
-    25  | .global trap_return
-    26  | trap_return:
-    27  | // TODO: restore UserContext
-    28  | 
-    29  | popp(x0, x1)       // x0 = sp_el0, x1 = 0 (来自xzr)
-    30  | msr sp_el0, x0     // 恢复用户栈指针
-    31  | popp(x0,x1)
-    32  | msr spsr_el1,x0
-    33  | msr elr_el1,x1
-    34  | popp(x0,x1)
-    35  | popp(x2,x3)
-    36  | popp(x4,x5)
-    37  | popp(x6,x7)
-    38  | popp(x8,x9)
-    39  | popp(x10,x11)
-    40  | popp(x12,x13)
-    41  | popp(x14,x15)
-    42  | popp(x16,x17)
-    43  | eret
+     1  | #include <aarch64/mmu.h>
+     2  | #include <common/defines.h>
+     3  | #include <common/list.h>
+     4  | #include <common/sem.h>
+     5  | #include <common/string.h>
+     6  | #include <fs/block_device.h>
+     7  | #include <fs/cache.h>
+     8  | #include <fs/file.h>
+     9  | #include <kernel/mem.h>
+    10  | #include <kernel/paging.h>
+    11  | #include <kernel/printk.h>
+    12  | #include <kernel/proc.h>
+    13  | #include <kernel/pt.h>
+    14  | #include <kernel/sched.h>
+    15  | 
+    16  | 
+    17  | void init_sections(ListNode *section_head) {
+    18  |     /* (Final) TODO BEGIN */
+    19  |     init_list_node(section_head);
+    20  |     /* (Final) TODO END */
+    21  | }
+    22  | 
+    23  | // struct section *add_section(ListNode *section_head, u64 begin, u64 end,
+    24  | //                             u64 flags, u64 offset, u64 length, const char *name)
+    25  | // {
+    26  | //     /* (Final) TODO BEGIN */
+    27  | //     auto sec = (struct section *)kalloc(sizeof(struct section));
+    28  | //     sec->flags = flags;
+    29  | //     sec->begin = begin;
+    30  | //     sec->end = end;
+    31  | //     sec->fp = NULL;
+    32  | //     sec->length = length;
+    33  | //     sec->offset = offset;
+    34  | //     sec->name = name;
+    35  | //     init_list_node(&sec->stnode);
+    36  |     
+    37  | //     _insert_into_list(section_head, &sec->stnode);
+    38  | //     printk("section %s: begin 0x%llx, end 0x%llx, offset 0x%llx, length 0x%llx\n",
+    39  | //            sec->name, sec->begin, sec->end, sec->offset, sec->length);
+    40  | //     return sec;
+    41  | //     /* (Final) TODO END */
+    42  | // }
+    43  | 
+    44  | 
+    45  | void free_sections(struct pgdir *pd) {
+    46  |     /* (Final) TODO BEGIN */
+    47  |     if (pd == NULL || pd->section_head.next == NULL) {
+    48  |         return;
+    49  |     }
+    50  |     
+    51  |     ListNode *node = pd->section_head.next;
+    52  |     while (node != &pd->section_head) {
+    53  |         printk("cpu: %lld, Freeing sections...\n",cpuid());
+    54  |         struct section *sec = container_of(node, struct section, stnode);
+    55  |         ListNode *next = node->next;
+    56  |         printk("cpu: %lld, Freeing section begin=0x%llx, end=0x%llx\n",cpuid(),
+    57  |                sec->begin, sec->end);
+    58  |         // 释放section占用的物理页
+    59  |         for (u64 va = sec->begin; va < sec->end; va += PAGE_SIZE) {
+    60  |             PTEntriesPtr pte = get_pte(pd, va, false);
+    61  |             if (pte != NULL) {
+    62  |                 printk("cpu: %lld, Freeing page at va=0x%llx\n",cpuid(),va);
+    63  |             }
+    64  |             if (pte && (*pte & PTE_VALID)) {
+    65  |                 void *pa = (void *)P2K(PTE_ADDRESS(*pte));
+    66  |                 kfree_page(pa);
+    67  |                 *pte = 0;
+    68  |             }
+    69  |             if (pte!=NULL)printk("cpu: %lld, Page at va=0x%llx freed\n",cpuid(),va);
+    70  |             if (va==0x1ff000ll){
+    71  |                 printk("BUG: trying to free va 0x1ff000\n");
+    72  |             }
+    73  |         }
+    74  |         printk("line 67: cpu: %lld, Freeing section: begin=0x%llx, end=0x%llx\n",cpuid(),
+    75  |                sec->begin, sec->end);
+    76  |         // 如果是file-backed section，释放inode引用
+    77  |         if (sec->fp) {
+    78  |             file_close(sec->fp); // 使用 file_close 而不是 inodes.put
+    79  |         }
+    80  |         printk("cpu: %lld, Section freed: begin=0x%llx, end=0x%llx\n",cpuid(),
+    81  |                sec->begin, sec->end);
+    82  |         // 释放section结构体
+    83  |         kfree(sec);
+    84  |         node = next;
+    85  |     }
+    86  |     
+    87  |     // 重新初始化链表头
+    88  |     init_list_node(&pd->section_head);
+    89  |     /* (Final) TODO END */
+    90  | }
+    91  | 
+    92  | u64 sbrk(i64 size) {
+    93  |     /**
+    94  |      * (Final) TODO BEGIN 
+    95  |      * 
+    96  |      * Increase the heap size of current process by `size`.
+    97  |      * If `size` is negative, decrease heap size. `size` must
+    98  |      * be a multiple of PAGE_SIZE.
+    99  |      * 
+   100  |      * Return the previous heap_end.
+   101  |      */
+   102  | 
+   103  |     
+   104  |     /* (Final) TODO END */
+   105  |     return (u64)-1; // TODO: 实现 sbrk
+   106  | }
+   107  | 
+   108  | int pgfault_handler(u64 iss) {
+   109  |     Proc *p = thisproc();
+   110  |     struct pgdir *pd = &p->pgdir;
+   111  |     u64 addr =
+   112  |             arch_get_far(); // Attempting to access this address caused the page fault
+   113  |     (void)pd;  // 避免未使用变量警告
+   114  |     (void)addr; // 避免未使用变量警告
+   115  |     (void)iss;  // 避免未使用变量警告
+   116  | 
+   117  |     /** 
+   118  |      * (Final) TODO BEGIN
+   119  |      * 
+   120  |      * 1. Find the section struct which contains the faulting address `addr`.
+   121  |      * 2. Check section flags to determine page fault type.
+   122  |      * 3. Handle the page fault accordingly.
+   123  |      * 4. Return to user code or kill the process.
+   124  |      */
+   125  | 
+   126  |     /* (Final) TODO END */
+   127  |     // TODO: 实现 page fault 处理，暂时杀死进程
+   128  |     return -1;
+   129  | }
+   130  | 
+   131  | void copy_sections(ListNode *from_head, ListNode *to_head)
+   132  | {
+   133  |     /* (Final) TODO BEGIN */
+   134  | 
+   135  |     /* (Final) TODO END */
+   136  | }
 
+================================================================================
+# src/kernel/exec.c
+
+     1  | #include <elf.h>
+     2  | #include <common/string.h>
+     3  | #include <common/defines.h>
+     4  | #include <kernel/console.h>
+     5  | #include <kernel/proc.h>
+     6  | #include <kernel/sched.h>
+     7  | #include <kernel/syscall.h>
+     8  | #include <kernel/pt.h>
+     9  | #include <kernel/mem.h>
+    10  | #include <kernel/paging.h>
+    11  | #include <kernel/printk.h>
+    12  | #include <aarch64/trap.h>
+    13  | #include <fs/file.h>
+    14  | #include <fs/inode.h>
+    15  | 
+    16  | extern int fdalloc(struct file *f);
+    17  | #ifndef MAXARGS
+    18  | #define MAXARGS 10
+    19  | #endif
+    20  | int execve(const char *path, char *const argv[], char *const envp[])
+    21  | {
+    22  |     /* (Final) TODO BEGIN */
+    23  |     printk("execve: path=%s\n", path);
+    24  |     Elf64_Ehdr elf_hdr;
+    25  |     Elf64_Phdr prog_hdr;
+    26  |     Inode *ip=NULL;
+    27  |     Proc *p=thisproc();
+    28  |     struct pgdir new_pgdir;
+    29  |     u64 sp, ustack[MAXARGS+1];
+    30  |     int argc,i;
+    31  |     OpContext ctx;
+    32  |     bcache.begin_op(&ctx);
+    33  |     if ((ip=namei(path,&ctx))==NULL){
+    34  |         bcache.end_op(&ctx);
+    35  |         return -1; //文件不存在
+    36  |     }
+    37  |     inodes.lock(ip);
+    38  |     if (inodes.read(ip,(u8 *)&elf_hdr,0,sizeof(elf_hdr))!=sizeof(elf_hdr)){
+    39  |         goto fail;
+    40  |     }
+    41  |     if (elf_hdr.e_ident[EI_MAG0]!=ELFMAG0 ||
+    42  |         elf_hdr.e_ident[EI_MAG1]!=ELFMAG1 ||
+    43  |         elf_hdr.e_ident[EI_MAG2]!=ELFMAG2 ||
+    44  |         elf_hdr.e_ident[EI_MAG3]!=ELFMAG3 ||
+    45  |         elf_hdr.e_type!=ET_EXEC ||
+    46  |         elf_hdr.e_machine!=EM_AARCH64){
+    47  |         goto fail;
+    48  |     }
+    49  | 
+    50  |     // 初始化新页目录和section链表
+    51  |     init_pgdir(&new_pgdir);
+    52  |     init_sections(&new_pgdir.section_head);
+    53  |     
+    54  |     // Step2: 加载所有PT_LOAD段
+    55  |     for (int i=0;i<elf_hdr.e_phnum;i++){
+    56  |         if (inodes.read(ip,(u8 *)&prog_hdr,elf_hdr.e_phoff+i*sizeof(prog_hdr),sizeof(prog_hdr))!=sizeof(prog_hdr)){
+    57  |             free_pgdir(&new_pgdir);
+    58  |             goto fail;
+    59  |         }
+    60  |         if (prog_hdr.p_type!=PT_LOAD){
+    61  |             printk("CPU: %lld, Skipping non-PT_LOAD segment %d.\n",cpuid(),i);
+    62  |             continue;
+    63  |         }
+    64  |         if (prog_hdr.p_memsz<prog_hdr.p_filesz||
+    65  |             prog_hdr.p_vaddr+prog_hdr.p_memsz<prog_hdr.p_vaddr){
+    66  |             free_pgdir(&new_pgdir);
+    67  |             goto fail;
+    68  |         }
+    69  |         printk("Loading segment %d: vaddr=0x%lx, memsz=0x%lx, filesz=0x%lx, offset=0x%lx\n",
+    70  |                i, prog_hdr.p_vaddr, prog_hdr.p_memsz, prog_hdr.p_filesz, prog_hdr.p_offset);
+    71  |         // 创建section
+    72  |         struct section *sec = kalloc(sizeof(struct section));
+    73  |         if (sec == NULL){
+    74  |             free_sections(&new_pgdir);
+    75  |             free_pgdir(&new_pgdir);
+    76  |             goto fail;
+    77  |         }
+    78  |         
+    79  |         // 设置section的范围（页对齐）
+    80  |         sec->begin = PAGE_BASE(prog_hdr.p_vaddr);
+    81  |         sec->end = PAGE_BASE((prog_hdr.p_vaddr + prog_hdr.p_memsz + (PAGE_SIZE - 1)));
+    82  |         
+    83  |         // 设置section标志
+    84  |         if (prog_hdr.p_flags & PF_X) {
+    85  |             // 可执行段（代码段）
+    86  |             sec->flags = ST_TEXT;  // ST_FILE | ST_RO
+    87  |         } else {
+    88  |             // 数据段
+    89  |             sec->flags = ST_DATA;  // ST_FILE
+    90  |         }
+    91  |         
+    92  |         // 设置文件相关信息
+    93  |         // TODO: 实际应该创建File结构，但先置为NULL
+    94  |         sec->fp = NULL; // 暂时置为NULL，待实现file系统
+    95  |         sec->offset = prog_hdr.p_offset;
+    96  |         sec->length = prog_hdr.p_filesz;
+    97  |         
+    98  |         // 添加到section链表
+    99  |         _insert_into_list(&new_pgdir.section_head, &sec->stnode);
+   100  |         printk("CPU: %lld, Inserted section: begin=0x%llx, end=0x%llx, flags=0x%llx\n",cpuid(),
+   101  |                sec->begin, sec->end, sec->flags);
+   102  |     }
+   103  |     printk("CPU: %lld, All loadable segments processed.\n",cpuid());
+   104  |     // Step3: 创建用户栈
+   105  |     #define USER_STACK_SIZE (8 * PAGE_SIZE)
+   106  |     #define USER_STACK_TOP 0x0000004000000000UL
+   107  |     
+   108  |     struct section *stack_sec = kalloc(sizeof(struct section));
+   109  |     if (stack_sec == NULL){
+   110  |         free_sections(&new_pgdir);
+   111  |         free_pgdir(&new_pgdir);
+   112  |         goto fail;
+   113  |     }
+   114  |     printk("CPU: %lld, 113.\n",cpuid());
+   115  |     stack_sec->begin = USER_STACK_TOP - USER_STACK_SIZE;
+   116  |     stack_sec->end = USER_STACK_TOP;
+   117  |     stack_sec->flags = ST_HEAP;  // 匿名段
+   118  |     stack_sec->fp = NULL;
+   119  |     stack_sec->offset = 0;
+   120  |     stack_sec->length = 0;
+   121  |     
+   122  |     _insert_into_list(&new_pgdir.section_head, &stack_sec->stnode);
+   123  |     
+   124  |     // Step4: 准备参数并压入栈
+   125  |     sp = USER_STACK_TOP;
+   126  |     
+   127  |     // 计算argc
+   128  |     for (argc = 0; argv && argv[argc]; argc++){
+   129  |         if (argc >= MAXARGS){
+   130  |             free_sections(&new_pgdir);
+   131  |             free_pgdir(&new_pgdir);
+   132  |             goto fail;
+   133  |         }
+   134  |     }
+   135  |     printk("CPU: %lld, 134.\n",cpuid());
+   136  |     // 计算envc
+   137  |     int envc;
+   138  |     for (envc = 0; envp && envp[envc]; envc++){
+   139  |         if (envc >= MAXARGS){
+   140  |             free_sections(&new_pgdir);
+   141  |             free_pgdir(&new_pgdir);
+   142  |             goto fail;
+   143  |         }
+   144  |     }
+   145  |     
+   146  |     // 压入envp字符串内容
+   147  |     u64 uenvp[MAXARGS+1];
+   148  |     for (i = envc - 1; i >= 0; i--) {
+   149  |         usize len = strlen(envp[i]) + 1;
+   150  |         sp -= len;
+   151  |         sp = round_down(sp, 8);  // 8字节对齐
+   152  |         if (copyout(&new_pgdir, (void*)sp, envp[i], len) < 0){
+   153  |             free_sections(&new_pgdir);
+   154  |             free_pgdir(&new_pgdir);
+   155  |             goto fail;
+   156  |         }
+   157  |         uenvp[i] = sp;
+   158  |     }
+   159  |     uenvp[envc] = 0;  // NULL终止符
+   160  |     printk("CPU: %lld, 159.\n",cpuid());
+   161  |     // 压入argv字符串内容
+   162  |     for (i = argc - 1; i >= 0; i--) {
+   163  |         usize len = strlen(argv[i]) + 1;
+   164  |         sp -= len;
+   165  |         sp = round_down(sp, 8);  // 8字节对齐
+   166  |         if (copyout(&new_pgdir, (void*)sp, argv[i], len) < 0){
+   167  |             free_sections(&new_pgdir);
+   168  |             free_pgdir(&new_pgdir);
+   169  |             goto fail;
+   170  |         }
+   171  |         ustack[i] = sp;
+   172  |     }
+   173  |     ustack[argc] = 0;  // NULL终止符
+   174  |     
+   175  |     // 压入envp指针数组
+   176  |     sp -= (envc + 1) * sizeof(u64);
+   177  |     sp = round_down(sp, 16);  // 16字节对齐
+   178  |     if (copyout(&new_pgdir, (void*)sp, uenvp, (envc + 1) * sizeof(u64)) < 0){
+   179  |         free_sections(&new_pgdir);
+   180  |         free_pgdir(&new_pgdir);
+   181  |         goto fail;
+   182  |     }
+   183  |     
+   184  |     // 压入argv指针数组
+   185  |     sp -= (argc + 1) * sizeof(u64);
+   186  |     sp = round_down(sp, 16);  // 16字节对齐
+   187  |     if (copyout(&new_pgdir, (void*)sp, ustack, (argc + 1) * sizeof(u64)) < 0){
+   188  |         free_sections(&new_pgdir);
+   189  |         free_pgdir(&new_pgdir);
+   190  |         goto fail;
+   191  |     }
+   192  |     printk("CPU: %lld, 191.\n",cpuid());
+   193  |     // 压入argc
+   194  |     u64 argc_val = argc;
+   195  |     sp -= sizeof(u64);
+   196  |     sp = round_down(sp, 16);  // 栈指针必须16字节对齐
+   197  |     if (copyout(&new_pgdir, (void*)sp, &argc_val, sizeof(u64)) < 0){
+   198  |         free_sections(&new_pgdir);
+   199  |         free_pgdir(&new_pgdir);
+   200  |         goto fail;
+   201  |     }
+   202  |     
+   203  |     // Step5: 保存旧的页目录并切换到新的
+   204  |     struct pgdir old_pgdir = p->pgdir;
+   205  |     
+   206  |     // 迁移旧的section链表到old_pgdir (其在栈上)
+   207  |     // 必须更新链表中节点的指针，使其指向old_pgdir.section_head，
+   208  |     // 否则free_sections中的循环无法正确通过比对 &old_pgdir.section_head 来终止。
+   209  |     init_list_node(&old_pgdir.section_head);
+   210  |     if (!_empty_list(&p->pgdir.section_head)) {
+   211  |         ListNode *first = p->pgdir.section_head.next;
+   212  |         ListNode *last = p->pgdir.section_head.prev;
+   213  |         
+   214  |         old_pgdir.section_head.next = first;
+   215  |         old_pgdir.section_head.prev = last;
+   216  |         first->prev = &old_pgdir.section_head;
+   217  |         last->next = &old_pgdir.section_head;
+   218  |         
+   219  |         // 重置原链表头，保持一致性，虽然稍后会被覆盖
+   220  |         init_list_node(&p->pgdir.section_head);
+   221  |     }
+   222  | 
+   223  |     p->pgdir = new_pgdir;
+   224  |     
+   225  |     // 设置进程上下文
+   226  |     p->ucontext->elr = elf_hdr.e_entry;  // 入口地址
+   227  |     p->ucontext->sp = sp;                // 栈指针
+   228  |     printk("CPU: %lld, 209.\n",cpuid());
+   229  |     // 释放旧的页目录和sections
+   230  |     free_sections(&old_pgdir);
+   231  |     printk("CPU: %lld, 212.\n",cpuid());
+   232  |     free_pgdir(&old_pgdir);
+   233  |     
+   234  |     // 关闭所有CLOEXEC文件
+   235  |     for (int fd = 0; fd < NOFILE; fd++) {
+   236  |         struct file *f = p->oftable.files[fd];
+   237  |         if (f) {
+   238  |             // 注意：这里简化处理，实际可能需要检查O_CLOEXEC标志
+   239  |             // 但当前实现中可能没有这个标志，所以暂不处理
+   240  |         }
+   241  |     }
+   242  |     printk("CPU: %lld, 222.\n",cpuid());
+   243  |     inodes.unlock(ip);
+   244  |     inodes.put(&ctx, ip);
+   245  |     bcache.end_op(&ctx);
+   246  |     printk("execve: loaded program '%s' (argc=%d, envc=%d)\n", path, argc, envc);
+   247  |     return 0;
+   248  | 
+   249  | fail:
+   250  |     printk("execve: failed to load program '%s'\n", path);
+   251  |     if (ip){
+   252  |         inodes.unlock(ip);
+   253  |         inodes.put(&ctx, ip);
+   254  |     }
+   255  |     bcache.end_op(&ctx);
+   256  |     return -1;
+   257  |     /* (Final) TODO END */
+   258  | }
+
+================================================================================
+# src/kernel/core.c
+
+     1  | #include <aarch64/intrinsic.h>
+     2  | #include <kernel/cpu.h>
+     3  | #include <kernel/printk.h>
+     4  | #include <kernel/sched.h>
+     5  | #include <test/test.h>
+     6  | #include <common/buf.h>
+     7  | #include <kernel/core.h>
+     8  | #include <driver/virtio.h>
+     9  | #include <kernel/proc.h>
+    10  | #include <kernel/mem.h>
+    11  | #include <kernel/pt.h>
+    12  | #include <kernel/paging.h>
+    13  | #include <common/string.h>
+    14  | #include <common/list.h>
+    15  | #include <fs/block_device.h>
+    16  | 
+    17  | volatile bool panic_flag;
+    18  | extern int virtio_blk_rw(Buf *b);
+    19  | extern void set_parent_to_this(Proc *proc);
+    20  | extern void trap_return();
+    21  | NO_RETURN void idle_entry()
+    22  | {
+    23  |     set_cpu_on();
+    24  |     if (cpuid() == 0) {
+    25  |         printk("CPU 0: entering idle loop\n");
+    26  |     }
+    27  |     while (1) {
+    28  |         yield();
+    29  |         if (panic_flag)
+    30  |             break;
+    31  |         arch_with_trap
+    32  |         {
+    33  |             arch_wfi();
+    34  |         }
+    35  |     }
+    36  |     set_cpu_off();
+    37  |     arch_stop_cpu();
+    38  | }
+    39  | 
+    40  | NO_RETURN void kernel_entry()
+    41  | {
+    42  | 
+    43  |         /* LAB 4 TODO 3 BEGIN */
+    44  |     Buf mbr_buf;
+    45  |     mbr_buf.block_no = 0;  // MBR在LBA 0
+    46  |     mbr_buf.flags = 0;      // 读操作
+    47  | 
+    48  |     printk("Reading MBR...\n");
+    49  | 
+    50  |     // 调用同步读写函数读取MBR
+    51  |     if (virtio_blk_rw(&mbr_buf) != 0) {
+    52  |         printk("Failed to read MBR!");
+    53  |         PANIC();
+    54  |     }
+    55  | 
+    56  |     // 数据已经在 mbr_buf.data 中了
+    57  |     MBR *mbr = (MBR *)mbr_buf.data;
+    58  | 
+    59  |     // 检查签名
+    60  |     if (mbr->signature != 0xAA55) {
+    61  |         printk("Invalid MBR signature!");
+    62  |         PANIC();
+    63  |     }
+    64  | 
+    65  |     // 获取第二分区信息
+    66  |     PartitionEntry *part2 = &mbr->partition[1];
+    67  |     u32 part2_start_lba = part2->start_lba;
+    68  |     u32 part2_num_sectors = part2->num_sectors;
+    69  | 
+    70  |     printk("Partition 2: Start LBA = %u, Size = %u sectors\n", 
+    71  |        part2_start_lba, part2_num_sectors);
+    72  |     
+    73  |     extern usize FS_PART_LBA_BASE;
+    74  |     FS_PART_LBA_BASE = part2_start_lba;
+    75  |     // printk("kernel_entry: started on CPU %lld\n", cpuid());
+    76  |     // extern void init_filesystem();
+    77  |     // printk("kernel_entry: calling init_filesystem\n");
+    78  |     init_filesystem();
+    79  |     // printk("kernel_entry: init_filesystem done\n");
+    80  |     
+    81  |     // printk("Hello world! (Core %lld)\n", cpuid());
+    82  |     // proc_test();
+    83  |     // vm_test();
+    84  |     // user_proc_test();
+    85  |     // printk("test proc_test() and user_proc_test() in lab5 passed.\n");
+    86  |     // io_test();
+    87  | 
+    88  | 
+    89  |     // block_device.read(part2_start_lba+1, (u8 *)get_super_block());
+    90  | 
+    91  |     /* LAB 4 TODO 3 END */
+    92  | 
+    93  |     /**
+    94  |      * (Final) TODO BEGIN 
+    95  |      * 
+    96  |      * Map init.S to user space and trap_return to run icode.
+    97  |      */
+    98  |     
+    99  |     extern char icode[], eicode[];
+   100  |     
+   101  |     // 创建第一个用户进程
+   102  |     Proc *p = create_proc();
+   103  |     if (p == NULL) {
+   104  |         PANIC();
+   105  |     }
+   106  |     printk("Creating first user process (PID %d)...\n", p->pid);
+   107  |     Proc *parent = thisproc();
+   108  |     printk("Parent PID is %d\n", parent->pid);
+   109  |     // 设置父进程为root进程
+   110  |     set_parent_to_this(p);
+   111  |     
+   112  |     // 创建代码段section
+   113  |     u64 icode_size = (u64)eicode - (u64)icode;
+   114  |     printk("icode_size is %lld\n",icode_size);
+   115  |     u64 icode_pages = (icode_size + PAGE_SIZE - 1) / PAGE_SIZE;
+   116  |     
+   117  |     struct section *text_sec = kalloc(sizeof(struct section));
+   118  |     if (text_sec == NULL) {
+   119  |         PANIC();
+   120  |     }
+   121  |     printk("allocating section\n");
+   122  |     text_sec->begin = 0x0;
+   123  |     text_sec->end = icode_pages * PAGE_SIZE;
+   124  |     text_sec->flags = ST_HEAP;  // 匿名段
+   125  |     text_sec->fp = NULL;
+   126  |     text_sec->offset = 0;
+   127  |     text_sec->length = 0;
+   128  |     printk("insert into list\n");
+   129  |     _insert_into_list(&p->pgdir.section_head, &text_sec->stnode);
+   130  |     printk("entering loop.\n");
+   131  |     // 分配物理页并复制icode内容
+   132  |     for (u64 i = 0; i < icode_pages; i++) {
+   133  |         void *page = kalloc_page();
+   134  |         if (page == NULL) {
+   135  |             PANIC();
+   136  |         }
+   137  |         memset(page, 0, PAGE_SIZE);
+   138  |         
+   139  |         u64 copy_size = MIN((u64)PAGE_SIZE, icode_size - i * PAGE_SIZE);
+   140  |         printk("memmove %lld\n",i);
+   141  |         memmove(page, icode + i * PAGE_SIZE, copy_size);
+   142  |         printk("vmmap %lld\n",i);
+   143  |         vmmap(&p->pgdir, i * PAGE_SIZE, page, PTE_USER_DATA);
+   144  |     }
+   145  |     printk("allocating stack\n");
+   146  |     // 创建用户栈
+   147  |     #define INIT_STACK_SIZE (8 * PAGE_SIZE)
+   148  |     #define INIT_STACK_TOP 0x0000004000000000UL
+   149  |     
+   150  |     struct section *stack_sec = kalloc(sizeof(struct section));
+   151  |     if (stack_sec == NULL) {
+   152  |         PANIC();
+   153  |     }
+   154  |     
+   155  |     stack_sec->begin = INIT_STACK_TOP - INIT_STACK_SIZE;
+   156  |     stack_sec->end = INIT_STACK_TOP;
+   157  |     stack_sec->flags = ST_HEAP;
+   158  |     stack_sec->fp = NULL;
+   159  |     stack_sec->offset = 0;
+   160  |     stack_sec->length = 0;
+   161  |     init_list_node(&p->pgdir.section_head); 
+   162  |     _insert_into_list(&p->pgdir.section_head, &stack_sec->stnode);
+   163  |     
+   164  |     // 设置进程上下文
+   165  |     p->ucontext->elr = 0;  // 从icode开始执行
+   166  |     p->ucontext->sp = INIT_STACK_TOP;  // 栈顶
+   167  |     p->ucontext->spsr = 0;  // 用户模式
+   168  |     // CHECK_IRQ();
+   169  |     // 设置返回上下文
+   170  |     p->kcontext->lr = (u64)&trap_return;
+   171  |     
+   172  |     // 激活进程
+   173  |     p->state = UNUSED;
+   174  |     
+   175  |     
+   176  |     // printk("First user process created, entering scheduler...\n");
+   177  |     
+   178  |     // auto p = create_proc();
+   179  |     // extern char icode[], eicode[];
+   180  |     // printk("core: icode:0x%llu, eicode:0x%llu, kend = 0x%llu\n", (u64)icode, (u64)eicode, 0x400000 + (u64)eicode - (u64)icode);
+   181  |     // if (!add_section(&p->pgdir.section_head, 0x400000, 0x400000 + (u64)eicode - (u64)icode, ST_TEXT, 0, 0, "text"))
+   182  |     //     PANIC();
+   183  |     // for (u64 q = (u64)icode; q < (u64)eicode; q += PAGE_SIZE) {
+   184  |     //     // void* page = kalloc_page();
+   185  |     //     // memcpy(page, (void*)q, PAGE_SIZE);
+   186  |     //     // vmmap(&p->pgdir, 0x400000 + q - (u64)icode, page, PTE_USER_DATA | PTE_RO);
+   187  |     //     *get_pte(&p->pgdir, 0x400000 + q - (u64)icode, true) = K2P(q) | PTE_USER_DATA;
+   188  |     // }
+   189  |     // p->ucontext->elr = 0x400000;
+   190  |     // p->ucontext->spsr = 0;
+   191  |     // p->cwd = inodes.share(inodes.root);
+   192  | 
+   193  |     start_proc(p, trap_return, 0);
+   194  | 
+   195  |     /* (Final) TODO END */
+   196  | 
+   197  |     // 启动调度器，永不返回
+   198  |     // while (1) {
+   199  |     //     yield();
+   200  |     // }
+   201  |     while (1) {
+   202  |         auto pid = wait(NULL);
+   203  |         (void)pid;
+   204  |     }
+   205  | }
+   206  | 
+   207  | NO_INLINE NO_RETURN void _panic(const char *file, int line)
+   208  | {
+   209  |     printk("=====%s:%d PANIC%lld!=====\n", file, line, cpuid());
+   210  |     panic_flag = true;
+   211  |     set_cpu_off();
+   212  |     while (1) {
+   213  |         bool all_offline = true;
+   214  |         for (int i = 0; i < NCPU; i++) {
+   215  |             if (cpus[i].online) {
+   216  |                 all_offline = false;
+   217  |                 break;
+   218  |             }
+   219  |         }
+   220  |         if (all_offline)
+   221  |             break;
+   222  |     }
+   223  |     printk("Kernel PANIC invoked at %s:%d. Stopped.\n", file, line);
+   224  |     arch_stop_cpu();
+   225  | }
 ================================================================================

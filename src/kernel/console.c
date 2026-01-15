@@ -43,6 +43,6 @@ isize console_read(Inode *ip, char *dst, isize n)
 void console_intr(char c)
 {
     /* (Final) TODO BEGIN */
-
+    (void)c;
     /* (Final) TODO END */
 }

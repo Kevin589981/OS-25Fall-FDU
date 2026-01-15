@@ -19,7 +19,7 @@ usize FS_PART_LBA_BASE=0;
  */
 static void sd_read(usize block_no, u8 *buffer) {
     usize phys_block = block_no + FS_PART_LBA_BASE;
-    printk("sd_read: reading block %lld (phys %lld)\n", (u64)block_no, (u64)phys_block);
+    // printk("sd_read: reading block %lld (phys %lld)\n", (u64)block_no, (u64)phys_block);
     Buf b;
     b.block_no = (u32)phys_block;
     b.flags = 0;

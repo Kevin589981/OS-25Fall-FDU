@@ -345,6 +345,7 @@ bool _activate_proc(Proc *p, bool onalert)
         cpus[target_cpu].sched.queue_weight += WEIGHT(p->schinfo.nice);
     
         release_sched_lock();
+        printk("Activated proc %d on CPU %d\n", p->pid, target_cpu);
         return true;
     }
     else if (p->state == ZOMBIE){

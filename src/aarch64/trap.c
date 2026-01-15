@@ -12,7 +12,7 @@ extern int note;
 void trap_global_handler(UserContext *context)
 {
     if (note==1){
-        printk("!!! note is 1, trap_global_handler: page fault handled, continuing execution.\n");
+        // printk("!!! note is 1, trap_global_handler: page fault handled, continuing execution.\n");
         note=0;
     }
     // printk("entering trap_global_handler\n");
