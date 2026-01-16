@@ -89,7 +89,7 @@ void pipe_close(Pipe *pi, int writable)
         post_all_sem(&pi->wlock);  // 唤醒所有等待写入的进程
     }
     
-    printk("[PIPE] After close: readopen=%d, writeopen=%d\n", pi->readopen, pi->writeopen);
+    // printk("[PIPE] After close: readopen=%d, writeopen=%d\n", pi->readopen, pi->writeopen);
     
     // 如果读端和写端都关闭了，释放管道
     if (pi->readopen == 0 && pi->writeopen == 0) {
