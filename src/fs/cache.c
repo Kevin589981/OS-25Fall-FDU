@@ -2,7 +2,19 @@
 #include <common/string.h>
 #include <fs/cache.h>
 #include <kernel/mem.h>
+#define PRINT_CACHE_LOG 1
+#ifdef PRINT_CACHE_LOG
+
+    #include <kernel/printk.h>
+#else
+    #define printk(...) do { } while(0)
+#endif
+
+// ============ 中断状态检测宏 ============
 #include <kernel/printk.h>
+
+
+
 #include <kernel/proc.h>
 static int num_cached_blocks=0;
 /**
@@ -76,7 +88,9 @@ static INLINE void device_write(Block *block) {
 
 // 从磁盘读取日志头。
 static INLINE void read_header() {
+    printk("read_header: calling device->read for block %lld\n", (u64)sblock->log_start);
     device->read(sblock->log_start, (u8 *)&header);
+    printk("read_header: device->read completed\n");
 }
 
 // 将日志头写回磁盘。
@@ -105,10 +119,14 @@ static usize get_num_cached_blocks() {
     return n;
 }
 
+int note=0;
+
 // see `cache.h`.
 static Block *cache_acquire(usize block_no) {
     // TODO
+    // printk("!!!important\n");
     acquire_spinlock(&lock);
+    // printk("acquire cache lock.\n");
     Block *b=NULL;
 
     _for_in_list(this_node, &head){
@@ -122,7 +140,14 @@ static Block *cache_acquire(usize block_no) {
             _insert_into_list(&head,this_node);
             b->acquired=TRUE;
             release_spinlock(&lock);
-            unalertable_acquire_sleeplock(&b->lock);
+            // unalertable_acquire_sleeplock(&b->lock);
+            if (acquire_sleeplock(&b->lock)){
+
+            }
+            if (b->block_no==93){
+                printk("acquired block 93.\n");
+            }
+            // printk("acquiring cache:147, block no is %lld.\n",b->block_no);
             return b;
         }
 
@@ -156,12 +181,19 @@ static Block *cache_acquire(usize block_no) {
     b->pinned=FALSE;
     _insert_into_list(&head, &b->node);
     release_spinlock(&lock);
-    unalertable_acquire_sleeplock(&b->lock);
+    // unalertable_acquire_sleeplock(&b->lock);
+    if (acquire_sleeplock(&b->lock)){
+
+    };
+    // printk("acquiring cache.\n");
+    // CHECK_IRQ();
     if (!b->valid){
+        note=1;
+        // printk("cache miss, reading from device.\n");
         device_read(b);
         b->valid=TRUE;
     }
-
+    // printk("acquired cache:193.\n");
     return b;
 }
 
@@ -171,23 +203,31 @@ static void cache_release(Block *block) {
     acquire_spinlock(&lock);
     block->acquired=FALSE;
     release_spinlock(&lock);
+    // post_all_sem(&block->lock);
     release_sleeplock(&block->lock);
 }
 
 // see `cache.h`.
 void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
+    printk("init_bcache: starting\n");
     sblock = _sblock;
     device = _device;
 
     // TODO
+    printk("init_bcache: initializing locks and lists\n");
     init_spinlock(&lock);
     init_list_node(&head);
     init_spinlock(&log.lock);
     init_sem(&log.sem,0);
     log.outstanding=0;
     log.committing=FALSE;
+    
+    printk("init_bcache: calling read_header\n");
     read_header();
+    printk("init_bcache: read_header done, num_blocks=%lld\n", (u64)header.num_blocks);
+    
     if (header.num_blocks>0){
+        printk("init_bcache: recovering %lld blocks\n", (u64)header.num_blocks);
         for (usize i=0;i<header.num_blocks;i++){
             Block buf_block;
             buf_block.block_no=sblock->log_start+1+i;
@@ -197,8 +237,10 @@ void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
         }
         header.num_blocks=0;
         write_header();
+        printk("init_bcache: recovery complete\n");
     }
-
+    
+    printk("init_bcache: completed\n");
 }
 
 // see `cache.h`.
@@ -271,6 +313,7 @@ void commit(){
         for (usize i = 0; i < header.num_blocks; i++) {
             Block buf_block;
             buf_block.block_no = sblock->log_start + 1 + i;
+            // printk("committing and read.\n");
             device_read(&buf_block); 
             buf_block.block_no = header.block_no[i];
             device_write(&buf_block);
