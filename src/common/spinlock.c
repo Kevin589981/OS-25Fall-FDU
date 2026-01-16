@@ -1,6 +1,7 @@
 #include <aarch64/intrinsic.h>
 #include <common/spinlock.h>
 #include <kernel/debug.h>
+
 #ifdef DEBUG_LOCK_CONFLICT
 #include <kernel/printk.h>
 #include <kernel/cpu.h>
@@ -36,7 +37,7 @@ bool try_acquire_spinlock(SpinLock *lock)
 
 #ifdef DEBUG_LOCK_CONFLICT
 extern SpinLock printk_lock;
-
+int count=0;
 void acquire_spinlock_internal(SpinLock *lock, const char *file, int line) {
     // 记录开始尝试获取锁的时间戳，用于检测自身等待是否超时
     // u64 start_time = get_timestamp();
@@ -45,23 +46,27 @@ void acquire_spinlock_internal(SpinLock *lock, const char *file, int line) {
     }
     // 循环尝试，直到成功获取锁
     while (try_acquire_spinlock(lock) == false) {
-        
+#define DEBUG_SPINLOCK 1        
 #ifdef DEBUG_SPINLOCK
         u64 current_time = get_timestamp();
         // 检查锁是否已经被持有太久
         if (lock->acquire_timestamp > (u64)0 && (current_time - lock->acquire_timestamp) > LOCK_TIMEOUT_US && lock->owner_cpu != -1&&lock!=&printk_lock&&!success) {
-            printk("\n--- KERNEL LOCK TIMEOUT ---\n");
-            printk("Possible deadlock! Lock 0x%p held for too long.\n", lock);
-            printk("Lock held by CPU: %d | PID: %d\n", lock->owner_cpu, lock->owner_pid);
-            printk("Lock acquired at: %s:%d\n", lock->owner_file, lock->owner_line);
-            printk("--- Current waiter ---\n");
-            Proc *p = thisproc();
-            printk("Current waiter CPU: %lld | PID: %d\n", cpuid(), (p ? p->pid : -1));
-            printk("Attempting to acquire at: %s:%d\n", file, line);
-            printk("---------------------------\n");
-
+            count++;
+            if (count==100){
+                printk("\n--- KERNEL LOCK TIMEOUT ---\n");
+                printk("Possible deadlock! Lock 0x%p held for too long.\n", lock);
+                printk("Lock held by CPU: %d | PID: %d\n", lock->owner_cpu, lock->owner_pid);
+                printk("Lock acquired at: %s:%d\n", lock->owner_file, lock->owner_line);
+                printk("--- Current waiter ---\n");
+                Proc *p = thisproc();
+                printk("Current waiter CPU: %lld | PID: %d\n", cpuid(), (p ? p->pid : -1));
+                printk("Attempting to acquire at: %s:%d\n", file, line);
+                printk("---------------------------\n");
+                count=0;
+            }
             // 重置锁的时间戳，避免在控制台疯狂刷屏
             lock->acquire_timestamp = current_time;
+
         }
 #endif
         // 使用 'yield' 或 'wfe' 指令提示CPU我们处于自旋等待状态，可以节省功耗

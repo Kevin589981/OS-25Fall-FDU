@@ -3,6 +3,7 @@
 #include <common/defines.h>
 #include <aarch64/intrinsic.h>
 #include <kernel/debug.h>
+// #define DEBUG_LOCK_CONFLICT 1
 // typedef struct {
 //     volatile bool locked;
 // } SpinLock;

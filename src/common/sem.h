@@ -25,7 +25,7 @@ void _lock_sem(Semaphore *);
 void _unlock_sem(Semaphore *);
 int get_all_sem(Semaphore *);
 int post_all_sem(Semaphore *);
-// #define wait_sem(sem) (_lock_sem(sem), _wait_sem(sem, true))
+#define __wait_sem(sem) (_lock_sem(sem), _wait_sem(sem, true))
 #define wait_sem(sem)                             \
     ({                                            \
         _lock_sem(sem);                           \
