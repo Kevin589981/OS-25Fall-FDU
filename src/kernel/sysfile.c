@@ -520,10 +520,39 @@ define_syscall(chdir, const char *path)
 
 define_syscall(pipe2, int pipefd[2], int flags)
 {
-
     /* (Final) TODO BEGIN */
+    File *f0, *f1;
+    int fd0, fd1;
+    
+    // 检查用户空间指针是否可写
+    if (!user_writeable(pipefd, sizeof(int) * 2))
+        return -1;
+    
+    // 分配管道
+    if (pipe_alloc(&f0, &f1) < 0)
+        return -1;
+    
+    // 分配文件描述符
+    fd0 = fdalloc(f0);
+    if (fd0 < 0) {
+        file_close(f0);
+        file_close(f1);
+        return -1;
+    }
+    
+    fd1 = fdalloc(f1);
+    if (fd1 < 0) {
+        thisproc()->oftable.files[fd0] = NULL;
+        file_close(f0);
+        file_close(f1);
+        return -1;
+    }
+    
+    // 将文件描述符写入用户空间
+    pipefd[0] = fd0;
+    pipefd[1] = fd1;
     
     /* (Final) TODO END */
-    (void)pipefd; (void)flags;
-    return -1; // TODO: 实现 pipe2
+    (void)flags;
+    return 0;
 }
