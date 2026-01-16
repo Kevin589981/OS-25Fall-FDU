@@ -5,26 +5,22 @@
 #include <aarch64/intrinsic.h>
 #include <kernel/cpu.h>
 #include <common/rbtree.h>
-#include <kernel/debug.h>
 #include <common/string.h>
-#include <common/list.h>
+#include <driver/clock.h>
 
 extern bool panic_flag;
 extern void swtch(KernelContext *new_ctx, KernelContext **old_ctx);
 u64 proc_entry(void (*entry)(u64), u64 arg);
-extern int idle_entry();
 extern Proc idle_procs[];
-
-#define PAGE_SIZE 4096
-#define NICE_0_LOAD 1024
 
 SpinLock global_sched_lock;
 
 // 每个CPU的调度定时器
 static struct timer sched_timers[NCPU];
 
-// 用于初始vruntime的展开，避免所有进程vruntime相同
+// 用于在激活新进程时，给vruntime增加一个小的偏移量，避免多个进程vruntime完全相同
 static u64 vruntime_spread_counter = 0;
+
 static u64 calculate_timeslice(Proc *p)
 {
     int cpu_id = cpuid();
@@ -41,14 +37,11 @@ static u64 calculate_timeslice(Proc *p)
 
     // 根据权重比例计算理想时间片
     // 注意：为保证计算精度，先乘后除
+    if (total_weight == 0) return SCHED_MIN_GRANULARITY_MS; // 避免除以0
     timeslice = (u64)SCHED_LATENCY_MS * WEIGHT(p->schinfo.nice) / total_weight;
 
     // 确保时间片不小于最小粒度
-    if (timeslice < SCHED_MIN_GRANULARITY_MS) {
-        return SCHED_MIN_GRANULARITY_MS;
-    }
-
-    return timeslice;
+    return timeslice < SCHED_MIN_GRANULARITY_MS ? SCHED_MIN_GRANULARITY_MS : timeslice;
 }
 
 // 红黑树比较函数：按vruntime排序
@@ -65,6 +58,7 @@ static bool rb_proc_less(struct rb_node_ *lnode, struct rb_node_ *rnode)
     // vruntime相同时按pid排序，保证确定性
     return lproc->pid < rproc->pid;
 }
+
 static void update_this_proc(Proc *p);
 static Proc *pick_next();
 
@@ -74,83 +68,17 @@ static void sched_timer_handler(struct timer *timer)
     acquire_sched_lock();
     
     Proc *current = thisproc();
-    int cpu_id = cpuid();
-    struct rb_root_ *queue = &cpus[cpu_id].sched.run_queue;
-    struct rb_node_ *leftmost = _rb_first(queue);
-    
-    if (current->idle) {
-        if (leftmost) {
-            auto next = pick_next();
-            update_this_proc(next);
-            ASSERT(next->state == RUNNABLE || next->idle);
-            
-            next->state = RUNNING;
-            next->schinfo.start_exec_time = get_timestamp();
-            
-            // 修改：根据nice值计算时间片
-            sched_timers[cpu_id].elapse = calculate_timeslice(next);
-            set_cpu_timer(&sched_timers[cpu_id]);
-            
-            if (next != current) {
-                attach_pgdir(&next->pgdir);
-                swtch(next->kcontext, &current->kcontext);
-            }
-            
-            release_sched_lock();
-            return;
-        } else {
-            Proc *stolen = NULL;
-            for (int i = 1; i < NCPU; i++) {
-                int target_cpu_id = (cpu_id + i) % NCPU;
-                struct rb_root_ *other_queue = &cpus[target_cpu_id].sched.run_queue;
-                
-                if (cpus[target_cpu_id].sched.task_count > 1) {
-                    struct rb_node_ *leftmost_other = _rb_first(other_queue);
-                    if (leftmost_other) {
-                        stolen = container_of(leftmost_other, Proc, schinfo.node);
-                        _rb_erase(leftmost_other, other_queue);
-                        cpus[target_cpu_id].sched.task_count--;
-                        // 修改：更新被窃取CPU的queue_weight
-                        cpus[target_cpu_id].sched.queue_weight -= WEIGHT(stolen->schinfo.nice);
-                        
-                        if (stolen->schinfo.vruntime < cpus[cpu_id].sched.min_vruntime) {
-                            stolen->schinfo.vruntime = cpus[cpu_id].sched.min_vruntime;
-                        }
-                        cpus[cpu_id].sched.task_count++;
-                        
-                        update_this_proc(stolen);
-                        stolen->state = RUNNING;
-                        stolen->schinfo.start_exec_time = get_timestamp();
-                        
-                        // 修改：根据nice值计算时间片
-                        sched_timers[cpu_id].elapse = calculate_timeslice(stolen);
-                        set_cpu_timer(&sched_timers[cpu_id]);
-                        
-                        attach_pgdir(&stolen->pgdir);
-                        swtch(stolen->kcontext, &current->kcontext);
-                        
-                        release_sched_lock();
-                        return;
-                    }
-                }
-            }
-            
-            release_sched_lock();
-            timer->elapse = SCHED_TIMESLICE_MS;
-            set_cpu_timer(timer);
-            return;
-        }
-    }
-    
+    // 如果当前进程不是RUNNING状态（可能在定时器触发前就阻塞了），则直接重设计时器并返回
     if (current->state != RUNNING) {
         release_sched_lock();
         timer->elapse = SCHED_TIMESLICE_MS;
         set_cpu_timer(timer);
         return;
     }
-    
+
+    // 更新当前进程的vruntime
     u64 current_time = get_timestamp();
-    if (current->schinfo.start_exec_time > 0) {
+    if (current->schinfo.start_exec_time > 0 && !current->idle) {
         u64 delta_exec = current_time - current->schinfo.start_exec_time;
         if (delta_exec > 0) {
             int weight = WEIGHT(current->schinfo.nice);
@@ -159,34 +87,23 @@ static void sched_timer_handler(struct timer *timer)
         }
     }
     
-    // 检查是否需要抢占
-    bool should_preempt = false;
-    if (leftmost) {
-        should_preempt = true;
-    }
-    
-    if (should_preempt) {
-        sched(RUNNABLE);
-    } else {
-        release_sched_lock();
-        // 修改：即使不抢占，也重新计算时间片并设置定时器
-        timer->elapse = calculate_timeslice(current);
-        set_cpu_timer(timer);
-    }
+    // 如果需要，进行抢占
+    sched(RUNNABLE);
 }
 
 void create_idle_proc()
 {
     for (int i = 0; i < NCPU; i++) {
-        cpus[i].sched.idle = &idle_procs[i];
         Proc *p = &idle_procs[i];
+        memset(p, 0, sizeof(Proc));
         p->state = RUNNING;
-        p->idle = TRUE;
+        p->idle = true;
         p->pid = -1 - i;
-        p->kstack = NULL;
+        p->kstack = NULL; // idle 进程不使用独立内核栈，它在启动栈上运行
         p->parent = NULL;
         p->ucontext = NULL;
         p->kcontext = NULL;
+        init_pgdir(&p->pgdir); // 即使是idle进程，也要有个空的页目录
 
         cpus[i].sched.current_proc = p;
         cpus[i].sched.idle = p;
@@ -204,17 +121,11 @@ void init_sched()
         s->run_queue.rb_node = NULL;
         s->task_count = 0;
         s->min_vruntime = 0;
-        s->queue_weight = 0; // 修改：初始化queue_weight
-        // cpus[i].zombie_to_reap = kalloc(sizeof(KernelContext));
+        s->queue_weight = 0;
         
         memset(&sched_timers[i], 0, sizeof(struct timer));
         sched_timers[i].elapse = SCHED_TIMESLICE_MS;
         sched_timers[i].handler = sched_timer_handler;
-        sched_timers[i].data = i; 
-        sched_timers[i].triggered = true; 
-        sched_timers[i]._node.rb_left = NULL;
-        sched_timers[i]._node.rb_right = NULL;
-        sched_timers[i]._node.__rb_parent_color = 0;
     }
     
     vruntime_spread_counter = 0;
@@ -249,6 +160,8 @@ void release_sched_lock()
 bool is_zombie(Proc *p)
 {
     bool r;
+    // 注意：检查进程状态通常需要更大的进程锁，但如果是从父进程的wait循环中调用，
+    // 且已持有进程锁，可以短暂获取调度锁来安全检查
     acquire_sched_lock();
     r = p->state == ZOMBIE;
     release_sched_lock();
@@ -264,15 +177,8 @@ bool is_unused(Proc *p)
     return r;
 }
 
-// 文件: sched.c
-
 bool _activate_proc(Proc *p, bool onalert)
 {
-    // TODO:(Lab5 new)
-    // if the proc->state is RUNNING/RUNNABLE, do nothing and return false
-    // if the proc->state is SLEEPING/UNUSED, set the process state to RUNNABLE, add it to the sched queue, and return true
-    // if the proc->state is DEEPSLEEPING, do nothing if onalert or activate it if else, and return the corresponding value.
-
     acquire_sched_lock(); 
     
     if (p->state == RUNNING || p->state == RUNNABLE) {
@@ -283,10 +189,11 @@ bool _activate_proc(Proc *p, bool onalert)
         release_sched_lock();
         return false;
     }
-    else if (p->state==DEEPSLEEPING||p->state == SLEEPING || p->state == UNUSED) {
+
+    if (p->state == SLEEPING || p->state == DEEPSLEEPING || p->state == UNUSED) {
+        // 负载均衡：选择任务最少的CPU
         int target_cpu = 0;
         u64 min_count = cpus[0].sched.task_count;
-        
         for (int i = 1; i < NCPU; i++) {
             if (cpus[i].sched.task_count < min_count) {
                 min_count = cpus[i].sched.task_count;
@@ -294,15 +201,12 @@ bool _activate_proc(Proc *p, bool onalert)
             }
         }
     
-        // ===================== 修改开始 =====================
         u64 base_vruntime;
-        // 如果目标CPU是空闲的，它的min_vruntime可能是一个陈旧的、被抬高的值。
-        // 为了避免新进程受到不公平的惩罚，需要从其他活跃的CPU同步一个更合理的vruntime基线。
+        // 如果目标CPU没有任务，其min_vruntime可能很旧，需要从全局找一个基准
         if (cpus[target_cpu].sched.task_count == 0) {
-            u64 global_min_vruntime = -1; // 使用-1代表无穷大
+            u64 global_min_vruntime = 0;
             bool found_active_cpu = false;
             for (int i = 0; i < NCPU; i++) {
-                // 只考虑那些有任务正在运行的CPU
                 if (cpus[i].sched.task_count > 0) {
                     if (!found_active_cpu || cpus[i].sched.min_vruntime < global_min_vruntime) {
                         global_min_vruntime = cpus[i].sched.min_vruntime;
@@ -310,155 +214,132 @@ bool _activate_proc(Proc *p, bool onalert)
                     found_active_cpu = true;
                 }
             }
-
-            if (found_active_cpu) {
-                // 如果找到了活跃的CPU，就以它们中最小的min_vruntime作为基准
-                base_vruntime = global_min_vruntime;
-                // 同时，也更新这个空闲CPU的min_vruntime，使其与系统保持同步
-                cpus[target_cpu].sched.min_vruntime = global_min_vruntime;
-            } else {
-                // 如果所有CPU都空闲，那么使用目标CPU自己的min_vruntime是安全的，
-                // 因为所有新进程都将从相似的基线开始。
-                base_vruntime = cpus[target_cpu].sched.min_vruntime;
-            }
+            base_vruntime = found_active_cpu ? global_min_vruntime : cpus[target_cpu].sched.min_vruntime;
+            // 更新空闲CPU的min_vruntime，使其与系统保持同步
+            if (found_active_cpu) cpus[target_cpu].sched.min_vruntime = global_min_vruntime;
         } else {
-            // 如果目标CPU本身就是活跃的，那么它的min_vruntime就是最新的，直接使用即可。
             base_vruntime = cpus[target_cpu].sched.min_vruntime;
         }
 
-        u64 spread_offset = vruntime_spread_counter * 10;
-        vruntime_spread_counter++;
-        if (vruntime_spread_counter >= 100) {
-            vruntime_spread_counter = 0;
-        }
-        
+        u64 spread_offset = (vruntime_spread_counter++ % 100) * 10;
         p->schinfo.vruntime = base_vruntime + spread_offset;
-        // ===================== 修改结束 =====================
         
         p->state = RUNNABLE;
     
-        if (_rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less)!=0){
+        if (_rb_insert(&p->schinfo.node, &cpus[target_cpu].sched.run_queue, rb_proc_less) != 0) {
             PANIC();
         }
         cpus[target_cpu].sched.task_count++;
-        // 修改：更新queue_weight
         cpus[target_cpu].sched.queue_weight += WEIGHT(p->schinfo.nice);
     
         release_sched_lock();
         return true;
     }
-    else if (p->state == ZOMBIE){
-        release_sched_lock();
-        return false;
-    }
-
+    
+    // 不应激活ZOMBIE状态的进程
     release_sched_lock();
-    PANIC();
+    if(p->state != ZOMBIE) PANIC();
     return false;
 }
 
-
 // 更新当前进程的vruntime
-static void update_vruntime(Proc *p, u64 current_time)
+static void update_vruntime(Proc *p)
 {
-    if (p->idle) return;
+    if (p->idle || p->schinfo.start_exec_time == 0) return;
     
-    if (p->schinfo.start_exec_time == 0) {
-        p->schinfo.start_exec_time = current_time;
-        return;
-    }
-    
+    u64 current_time = get_timestamp();
     u64 delta_exec = current_time - p->schinfo.start_exec_time;
     if (delta_exec > 0) {
-        // vruntime增量 = 实际运行时间 * NICE_0_LOAD / weight
         int weight = WEIGHT(p->schinfo.nice);
         u64 delta_vruntime = (delta_exec * NICE_0_LOAD) / weight;
         p->schinfo.vruntime += delta_vruntime;
     }
-    
-    p->schinfo.start_exec_time = current_time;
 }
 
 static void update_this_state(enum procstate new_state)
 {
     Proc *this = thisproc();
+    int my_cpu = cpuid();
+    
     if (this->idle) {
-        // idle进程保持RUNNING状态，不参与调度队列
-        this->state = RUNNING;
+        this->state = RUNNING; // idle进程永远是RUNNING
         return;
     }
+
+    update_vruntime(this);
     
-    int my_cpu = cpuid();
-    u64 current_time = get_timestamp();
-    
-    // 更新vruntime
-    update_vruntime(this, current_time);
-    
-    // 更新min_vruntime
-    if (this->schinfo.vruntime > cpus[my_cpu].sched.min_vruntime) {
+    // 更新min_vruntime，以队列中最左边的vruntime为基准，或者当前进程的vruntime
+    struct rb_node_ *leftmost = _rb_first(&cpus[my_cpu].sched.run_queue);
+    u64 queue_min_vruntime = -1; // -1 represents infinity
+    if(leftmost) {
+        queue_min_vruntime = container_of(leftmost, Proc, schinfo.node)->schinfo.vruntime;
+    }
+
+    if(this->schinfo.vruntime > queue_min_vruntime) {
+        cpus[my_cpu].sched.min_vruntime = queue_min_vruntime;
+    } else {
         cpus[my_cpu].sched.min_vruntime = this->schinfo.vruntime;
     }
-    
+
     this->state = new_state;
     
     if (new_state == RUNNABLE) {
-        // RUNNING -> RUNNABLE: 插入红黑树
-        if (_rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less)!=0){
+        // 从RUNNING变为RUNNABLE，重新插入红黑树
+        if (_rb_insert(&this->schinfo.node, &cpus[my_cpu].sched.run_queue, rb_proc_less) != 0) {
             PANIC();
         }
         cpus[my_cpu].sched.queue_weight += WEIGHT(this->schinfo.nice);
-    } else if (new_state == ZOMBIE||new_state==SLEEPING||new_state==DEEPSLEEPING) {
+    } else if (new_state == ZOMBIE || new_state == SLEEPING || new_state == DEEPSLEEPING) {
+        // 进程离开运行队列，总任务数减少
         cpus[my_cpu].sched.task_count--;
     }
 }
 
 static Proc *pick_next()
 {
-    if (panic_flag) return cpus[cpuid()].sched.idle;
-    
     int my_cpu = cpuid();
-    struct rb_root_ *my_queue = &cpus[my_cpu].sched.run_queue;
-    Proc *next_proc = NULL;
+    struct sched *s = &cpus[my_cpu].sched;
+
+    if (panic_flag) return s->idle;
     
-    // 从红黑树中选择最左节点（vruntime最小）
-    struct rb_node_ *leftmost = _rb_first(my_queue);
+    struct rb_node_ *leftmost = _rb_first(&s->run_queue);
     
     if (leftmost) {
-        next_proc = container_of(leftmost, Proc, schinfo.node);
-        _rb_erase(leftmost, my_queue);
-        cpus[my_cpu].sched.queue_weight -= WEIGHT(next_proc->schinfo.nice);
+        Proc* next_proc = container_of(leftmost, Proc, schinfo.node);
+        _rb_erase(leftmost, &s->run_queue);
+        s->queue_weight -= WEIGHT(next_proc->schinfo.nice);
         return next_proc;
     }
     
     // 当前队列为空，尝试工作窃取
-    Proc *stolen = NULL;
-    for (int i = 0; i < NCPU; i++) {
-        int target_cpu_id = (my_cpu + i + 1) % NCPU;
-        if (target_cpu_id == my_cpu) continue;
-    
-        struct rb_root_ *other_queue = &cpus[target_cpu_id].sched.run_queue;
-        if (cpus[target_cpu_id].sched.task_count > 1) { // 只从有多个任务的CPU窃取
-            struct rb_node_ *leftmost_other = _rb_first(other_queue);
-            if (leftmost_other) {
-                stolen = container_of(leftmost_other, Proc, schinfo.node);
-                _rb_erase(leftmost_other, other_queue);
-                cpus[target_cpu_id].sched.task_count--;
-                cpus[target_cpu_id].sched.queue_weight -= WEIGHT(stolen->schinfo.nice);
-                break;
+    for (int i = 1; i < NCPU; i++) {
+        int target_cpu_id = (my_cpu + i) % NCPU;
+        struct sched *target_s = &cpus[target_cpu_id].sched;
+
+        // 只从任务数大于1的CPU窃取，避免把对方偷空
+        if (target_s->task_count > 1) {
+            struct rb_node_ *stolen_node = _rb_first(&target_s->run_queue);
+            if (stolen_node) {
+                Proc *stolen = container_of(stolen_node, Proc, schinfo.node);
+                
+                // 从目标CPU移除
+                _rb_erase(stolen_node, &target_s->run_queue);
+                target_s->task_count--;
+                target_s->queue_weight -= WEIGHT(stolen->schinfo.nice);
+                
+                // 调整vruntime以适应本地CPU的min_vruntime
+                if (stolen->schinfo.vruntime < s->min_vruntime) {
+                    stolen->schinfo.vruntime = s->min_vruntime;
+                }
+                
+                // 添加到本地CPU
+                s->task_count++;
+                return stolen;
             }
         }
     }
     
-    if (stolen) {
-        // 调整vruntime以适应本地CPU的min_vruntime
-        if (stolen->schinfo.vruntime < cpus[my_cpu].sched.min_vruntime) {
-            stolen->schinfo.vruntime = cpus[my_cpu].sched.min_vruntime;
-        }
-        cpus[my_cpu].sched.task_count++;
-        return stolen;
-    }
-    
-    return cpus[my_cpu].sched.idle;
+    return s->idle;
 }
 
 static void update_this_proc(Proc *p)
@@ -470,7 +351,7 @@ void sched(enum procstate new_state)
 {
     ASSERT(global_sched_lock.locked == 1);
     
-    auto this = thisproc();
+    Proc* this = thisproc();
     int my_cpu = cpuid();
     
     if (this->killed && new_state != ZOMBIE) {
@@ -480,15 +361,15 @@ void sched(enum procstate new_state)
     
     ASSERT(this->state == RUNNING);
     
-    // 取消当前CPU的调度定时器
+    // 取消当前CPU的调度定时器（静态条件？）
     if (!sched_timers[my_cpu].triggered) {
         cancel_cpu_timer(&sched_timers[my_cpu]);
         sched_timers[my_cpu].triggered = true;
     }
-    
+
     update_this_state(new_state);
     
-    auto next = pick_next();
+    Proc* next = pick_next();
     
     update_this_proc(next);
     ASSERT(next->state == RUNNABLE || next->idle);
@@ -507,8 +388,6 @@ void sched(enum procstate new_state)
 
     release_sched_lock();
 }
-
-void trap_return(u64);
 
 u64 proc_entry(void (*entry)(u64), u64 arg)
 {

@@ -7,7 +7,6 @@
 #include <kernel/pt.h>
 #include <fs/file.h>
 #include <fs/inode.h>
-#include <common/spinlock.h>
 
 enum procstate { UNUSED, RUNNABLE, RUNNING, SLEEPING, DEEPSLEEPING, ZOMBIE };
 
