@@ -145,7 +145,7 @@ static Block *cache_acquire(usize block_no) {
 
             }
             if (b->block_no==93){
-                printk("acquired block 93.\n");
+                // printk("acquired block 93.\n");
             }
             // printk("acquiring cache:147, block no is %lld.\n",b->block_no);
             return b;
@@ -209,12 +209,12 @@ static void cache_release(Block *block) {
 
 // see `cache.h`.
 void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
-    printk("init_bcache: starting\n");
+    // printk("init_bcache: starting\n");
     sblock = _sblock;
     device = _device;
 
     // TODO
-    printk("init_bcache: initializing locks and lists\n");
+    // printk("init_bcache: initializing locks and lists\n");
     init_spinlock(&lock);
     init_list_node(&head);
     init_spinlock(&log.lock);
@@ -222,12 +222,12 @@ void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
     log.outstanding=0;
     log.committing=FALSE;
     
-    printk("init_bcache: calling read_header\n");
+    // printk("init_bcache: calling read_header\n");
     read_header();
-    printk("init_bcache: read_header done, num_blocks=%lld\n", (u64)header.num_blocks);
+    // printk("init_bcache: read_header done, num_blocks=%lld\n", (u64)header.num_blocks);
     
     if (header.num_blocks>0){
-        printk("init_bcache: recovering %lld blocks\n", (u64)header.num_blocks);
+        // printk("init_bcache: recovering %lld blocks\n", (u64)header.num_blocks);
         for (usize i=0;i<header.num_blocks;i++){
             Block buf_block;
             buf_block.block_no=sblock->log_start+1+i;
@@ -237,10 +237,10 @@ void init_bcache(const SuperBlock *_sblock, const BlockDevice *_device) {
         }
         header.num_blocks=0;
         write_header();
-        printk("init_bcache: recovery complete\n");
+        // printk("init_bcache: recovery complete\n");
     }
     
-    printk("init_bcache: completed\n");
+    // printk("init_bcache: completed\n");
 }
 
 // see `cache.h`.
