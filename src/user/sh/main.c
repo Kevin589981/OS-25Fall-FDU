@@ -162,6 +162,7 @@ int getcmd(char *buf, int nbuf)
 
 int main(int argc, char *argv[])
 {
+    printf("entering sh main()\n");   
     for (int i = 0; i < argc; i++) {
         printf("sh: argv[%d] = '%s'\n", i, argv[i]);
     }
