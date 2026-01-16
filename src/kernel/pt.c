@@ -2,7 +2,9 @@
 #include <common/string.h>
 #include <kernel/mem.h>
 #include <kernel/pt.h>
+#include <common/defines.h>
 #include <kernel/printk.h>
+#include <kernel/paging.h>
 
 PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc)
 {
@@ -81,6 +83,8 @@ PTEntriesPtr get_pte(struct pgdir *pgdir, u64 va, bool alloc)
 void init_pgdir(struct pgdir *pgdir)
 {
     pgdir->pt = NULL;
+    init_spinlock(&pgdir->lock);
+    init_list_node(&pgdir->section_head);
 }
 
 void free_pgdir(struct pgdir *pgdir)
@@ -128,14 +132,11 @@ void attach_pgdir(struct pgdir *pgdir)
 void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
 {
     /* (Final) TODO BEGIN */
-    u64 pa = (u64)K2P(ka);
     PTEntriesPtr pte = get_pte(pd, va, true);
-    if (!pte)
-    {
-        printk("vmmap: get_pte failed\n");
-        return;
+    if (pte == NULL) {
+        PANIC();
     }
-    *pte = PAGE_BASE(pa) | flags;
+    *pte = K2P(ka) | flags | PTE_VALID;
     arch_tlbi_vmalle1is();
     /* (Final) TODO END */
 }
@@ -148,27 +149,41 @@ void vmmap(struct pgdir *pd, u64 va, void *ka, u64 flags)
 int copyout(struct pgdir *pd, void *va, void *p, usize len)
 {
     /* (Final) TODO BEGIN */
-    usize total_copied = 0;
-    while (total_copied < len)
-    {
-        PTEntriesPtr pte = get_pte(pd, (u64)va, true);
-        if (*pte == NULL)
-        {
-            void *new_page = kalloc_page();
-            *pte = K2P(new_page) | PTE_USER_DATA;
+    u64 va_start = (u64)va;
+    u8 *src = (u8 *)p;
+    
+    while (len > 0) {
+        u64 va_page = PAGE_BASE(va_start);
+        u64 offset = va_start - va_page;
+        u64 n = MIN(PAGE_SIZE - offset, len);
+        
+        // 获取或分配页表项
+        PTEntriesPtr pte = get_pte(pd, va_start, true);
+        if (pte == NULL) {
+            return -1;
         }
-
-        usize copy_size = MIN(len - total_copied, PAGE_SIZE - VA_OFFSET(va));
-        void *dst = (void *)(P2K(PTE_ADDRESS(*pte)) + VA_OFFSET(va));
-        memcpy(dst, p, copy_size);
-
-        total_copied += copy_size;
-        p += copy_size;
-        va += copy_size;
+        
+        // 如果页面不存在，分配新页
+        void *pa;
+        if ((*pte & PTE_VALID) == 0) {
+            void *page = kalloc_page();
+            if (page == NULL) {
+                return -1;
+            }
+            memset(page, 0, PAGE_SIZE);
+            *pte = K2P(page) | PTE_USER_DATA | PTE_VALID;
+            pa = page;
+        } else {
+            pa = (void *)P2K(PTE_ADDRESS(*pte));
+        }
+        
+        memmove((u8 *)pa + offset, src, n);
+        
+        len -= n;
+        src += n;
+        va_start += n;
     }
-    if (total_copied == len)
-        return 0;
-    else
-        return -1;
+    
+    return 0;
     /* (Final) TODO END */
 }

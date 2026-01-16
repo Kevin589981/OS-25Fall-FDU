@@ -160,7 +160,11 @@ NO_RETURN void exit(int code)
 
     // 1. 清理文件等资源
     if(this->cwd) {
-        decrement_rc(&this->cwd->rc);
+        // decrement_rc(&this->cwd->rc);
+        OpContext ctx;
+        bcache.begin_op(&ctx);
+        inodes.put(&ctx, this->cwd);
+        bcache.end_op(&ctx);
         this->cwd = NULL;
     }
     for (int i = 0; i < NOFILE; i++) {
@@ -191,7 +195,10 @@ NO_RETURN void exit(int code)
     post_sem(&this->parent->childexit);
 
     release_spinlock(&global_process_lock);
+    free_sections(&this->pgdir);
 
+    free_pgdir(&this->pgdir);
+    this->pgdir.pt = NULL; // 确保指针被清空
     // 4. 进入僵尸状态并调度
     acquire_sched_lock();
     sched(ZOMBIE);
