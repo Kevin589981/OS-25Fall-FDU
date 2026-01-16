@@ -111,8 +111,24 @@ void console_intr(char c)
             uart_put_char('\b');
         }
         break;
+    case '\x1b': // ESC - 忽略转义序列的开始
+        // 方向键等会产生 ESC[A 这样的序列，直接忽略 ESC
+        break;
+    case C('C'): // Ctrl-C - 当前不支持信号，仅忽略
+        // TODO: 实现信号机制后可以发送 SIGINT
+        break;
+    case C('V'): // Ctrl-V - 当前不支持粘贴，仅忽略
+        break;
+    case C('Z'): // Ctrl-Z - 当前不支持作业控制，仅忽略
+        break;
     default:
         if (c != 0 && cons.edit_idx - cons.read_idx < IBUF_SIZE) {
+            // 过滤不可打印字符（保留制表符、换行、回车）
+            if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+                // 忽略其他控制字符
+                break;
+            }
+            
             // 回显字符（除了换行符可能需要转换）
             c = (c == '\r') ? '\n' : c;
             uart_put_char(c);
