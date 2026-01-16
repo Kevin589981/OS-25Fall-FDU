@@ -26,6 +26,12 @@
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#endif
+
 struct iovec {
     void *iov_base; /* Starting address. */
     usize iov_len; /* Number of bytes to transfer. */
@@ -77,19 +83,172 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
                int offset)
 {
     /* (Final) TODO BEGIN */
+    // return 2147483647;
+    if (length <= 0)
+        return (u64)-1;
     
+    // 对齐到页边界
+    length = (length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    
+    Proc *p = thisproc();
+    struct pgdir *pd = &p->pgdir;
+    
+    // 分配新的 section
+    Section *sec = (Section *)kalloc(sizeof(Section));
+    if (!sec)
+        return (u64)-1;
+    
+    init_section(sec);
+    
+    // 查找可用的虚拟地址空间
+    acquire_spinlock(&pd->lock);
+    
+    u64 va_start;
+    if (addr && (flags & MAP_FIXED)) {
+        // 使用指定地址
+        va_start = (u64)addr;
+    } else {
+        // 自动分配地址：查找一个空闲区域
+        // 从用户空间高地址开始查找（避免与堆冲突）
+        va_start = 0x40000000; // 起始地址
+        
+        // 检查是否与现有 section 冲突
+        bool found = false;
+        for (u64 try_addr = va_start; try_addr < 0x80000000; try_addr += length) {
+            bool conflict = false;
+            _for_in_list(node, &pd->section_head) {
+                if (node == &pd->section_head) continue;
+                Section *s = container_of(node, Section, stnode);
+                // 检查是否重叠
+                if (!(try_addr + length <= s->begin || try_addr >= s->end)) {
+                    conflict = true;
+                    break;
+                }
+            }
+            if (!conflict) {
+                va_start = try_addr;
+                found = true;
+                break;
+            }
+        }
+        
+        if (!found) {
+            release_spinlock(&pd->lock);
+            kfree(sec);
+            return (u64)-1;
+        }
+    }
+    
+    sec->begin = va_start;
+    sec->end = va_start + length;
+    
+    // 如果是文件映射
+    if (!(flags & MAP_ANONYMOUS) && fd >= 0) {
+        struct file *f = fd2file(fd);
+        if (!f) {
+            release_spinlock(&pd->lock);
+            kfree(sec);
+            return (u64)-1;
+        }
+        
+        // 检查文件权限和映射类型
+        if ((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable) {
+            // MAP_SHARED 且请求写权限，但文件不可写
+            release_spinlock(&pd->lock);
+            kfree(sec);
+            return (u64)-1;
+        }
+        
+        sec->fp = file_dup(f);
+        sec->offset = offset;
+        sec->length = length;
+        sec->flags = ST_FILE;
+        
+        // MAP_PRIVATE 时，即使文件只读，也可以请求写权限（COW）
+        // 只有在真正写入时才会复制页面
+    } else {
+        // 匿名映射
+        sec->fp = NULL;
+        sec->offset = 0;
+        sec->length = 0;
+        sec->flags = ST_HEAP; // 匿名映射使用 HEAP 标志（延迟分配）
+    }
+    
+    // 将 section 添加到链表
+    _insert_into_list(&pd->section_head, &sec->stnode);
+    
+    release_spinlock(&pd->lock);
+    
+    printk("mmap: va=[%llx, %llx) len=%d flags=%llx fd=%d fp=%p\n", 
+           (unsigned long long)va_start, (unsigned long long)sec->end, 
+           length, sec->flags, fd, sec->fp);
+    
+    // 验证 section 已插入
+    acquire_spinlock(&pd->lock);
+    Section *verify = lookup_section(pd, va_start);
+    release_spinlock(&pd->lock);
+    printk("mmap: verify lookup_section(%llx) = %p\n", 
+           (unsigned long long)va_start, verify);
+    
+    return va_start;
     /* (Final) TODO END */
-    (void)addr; (void)length; (void)prot; (void)flags; (void)fd; (void)offset;
-    return (u64)-1; // TODO: 实现 mmap
 }
 
 define_syscall(munmap, void *addr, size_t length)
 {
     /* (Final) TODO BEGIN */
+    if (!addr || length <= 0)
+        return -1;
     
+    u64 va_start = (u64)addr;
+    u64 va_end = va_start + ((length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    
+    Proc *p = thisproc();
+    struct pgdir *pd = &p->pgdir;
+    
+    acquire_spinlock(&pd->lock);
+    
+    // 查找并删除覆盖该地址范围的 sections
+    ListNode *node = pd->section_head.next;
+    while (node != &pd->section_head) {
+        Section *sec = container_of(node, Section, stnode);
+        ListNode *next = node->next;
+        
+        // 检查是否有重叠
+        if (!(va_end <= sec->begin || va_start >= sec->end)) {
+            // 简化处理：如果完全覆盖，删除整个 section
+            if (va_start <= sec->begin && va_end >= sec->end) {
+                // 释放该 section 占用的物理页
+                for (u64 va = sec->begin; va < sec->end; va += PAGE_SIZE) {
+                    PTEntriesPtr pte = get_pte(pd, va, false);
+                    if (pte && (*pte & PTE_VALID)) {
+                        void *pa = (void *)P2K(PTE_ADDRESS(*pte));
+                        kfree_page(pa);
+                        *pte = 0;
+                    }
+                }
+                
+                // 关闭文件
+                if (sec->fp) {
+                    file_close(sec->fp);
+                }
+                
+                // 从链表中移除
+                _detach_from_list(&sec->stnode);
+                kfree(sec);
+            }
+            // 部分覆盖的情况比较复杂，这里简化处理
+            // 实际实现可能需要拆分 section
+        }
+        
+        node = next;
+    }
+    
+    release_spinlock(&pd->lock);
+    arch_tlbi_vmalle1is();
+    
+    return 0;
     /* (Final) TODO END */
-    (void)addr; (void)length;
-    return -1; // TODO: 实现 munmap
 }
 
 define_syscall(dup, int fd)

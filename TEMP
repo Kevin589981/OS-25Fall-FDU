@@ -1,0 +1,276 @@
+/**
+ * @file exec.c
+ * @brief Implementation of the execve system call using a hybrid loading strategy.
+ * 
+ * This file implements execve with a demand-paging approach for executable (text)
+ * segments to accelerate process startup and conserve memory. Data segments are
+ * eagerly loaded for simplicity and immediate availability.
+ */
+
+#include <elf.h>
+#include <common/string.h>
+#include <common/defines.h>
+#include <kernel/proc.h>
+#include <kernel/sched.h>
+#include <kernel/syscall.h>
+#include <kernel/mem.h>
+#include <kernel/paging.h>
+#include <kernel/printk.h>
+#include <fs/file.h>
+#include <fs/inode.h>
+
+// Forward declaration for file system functions if not in a common header.
+struct file* file_alloc(void);
+
+#define MAXARGS 32
+#define USER_STACK_TOP   0x0000004000000000UL
+#define USER_STACK_SIZE  (8 * PAGE_SIZE)
+
+/**
+ * @brief Loads ELF segments into a new address space using a hybrid strategy.
+ * 
+ * - RX (Text) Segments: Configured for demand paging. A section is created with
+ *   file-backing information, but no physical pages are allocated upfront. Pages
+ *   will be loaded by the page fault handler on first access.
+ * - RW (Data) Segments: Eagerly loaded. Physical pages are allocated, data is
+ *   read from the file, BSS is zeroed, and pages are mapped immediately.
+ * 
+ * @param ip The inode of the executable file.
+ * @param ehdr A pointer to the ELF header.
+ * @param new_pgdir The new page directory to be populated.
+ * @return 0 on success, -1 on failure.
+ */
+static int load_elf_segments(Inode *ip, Elf64_Ehdr *ehdr, struct pgdir *new_pgdir)
+{
+    Elf64_Phdr phdr;
+
+    for (int i = 0; i < ehdr->e_phnum; i++) {
+        u64 ph_off = ehdr->e_phoff + i * sizeof(phdr);
+        if (inodes.read(ip, (u8 *)&phdr, ph_off, sizeof(phdr)) != sizeof(phdr))
+            return -1;
+
+        if (phdr.p_type != PT_LOAD || phdr.p_memsz == 0)
+            continue;
+
+        if (phdr.p_memsz < phdr.p_filesz || phdr.p_vaddr + phdr.p_memsz < phdr.p_vaddr)
+            return -1;
+
+        struct section *sec = kalloc(sizeof(struct section));
+        if (sec == NULL) return -1;
+        memset(sec, 0, sizeof(struct section));
+        init_section(sec);
+
+        sec->begin = PAGE_BASE(phdr.p_vaddr);
+        sec->end = PAGE_ALIGN(phdr.p_vaddr + phdr.p_memsz);
+
+        if (phdr.p_flags & PF_X) { // Text Segment (RX) -> Demand Paging
+            sec->flags = ST_TEXT;
+            sec->fp = file_alloc();
+            if (sec->fp == NULL) {
+                kfree(sec);
+                return -1;
+            }
+            sec->fp->ip = inodes.share(ip);
+            sec->fp->readable = true;
+            sec->fp->writable = false;
+            sec->fp->off = 0;
+            sec->fp->type = FD_INODE;
+            sec->offset = phdr.p_offset;
+            sec->length = phdr.p_filesz;
+            // No pages allocated here. They will be loaded on-demand by page fault handler.
+        
+        } else if (phdr.p_flags & PF_W) { // Data Segment (RW) -> Eager Loading
+            sec->flags = ST_DATA;
+            sec->fp = NULL; // Not a file-backed section after loading.
+            
+            // Eagerly allocate pages and load data for this section.
+            for (u64 va = sec->begin; va < sec->end; va += PAGE_SIZE) {
+                void *pa = kalloc_page();
+                if (pa == NULL) {
+                    kfree(sec);
+                    return -1; // Cleanup will be handled by caller
+                }
+                memset(pa, 0, PAGE_SIZE);
+
+                u64 seg_file_start = phdr.p_vaddr;
+                u64 seg_file_end = phdr.p_vaddr + phdr.p_filesz;
+
+                if (va < seg_file_end) {
+                    u64 read_start = MAX(va, seg_file_start);
+                    u64 read_end = MIN(va + PAGE_SIZE, seg_file_end);
+                    if (read_start < read_end) {
+                        u64 file_off = phdr.p_offset + (read_start - seg_file_start);
+                        u64 pa_off = read_start - va;
+                        u64 len = read_end - read_start;
+                        if (inodes.read(ip, (u8 *)pa + pa_off, file_off, len) != len) {
+                            kfree_page(pa);
+                            kfree(sec);
+                            return -1;
+                        }
+                    }
+                }
+                // vmmap is a void function; it panics on failure.
+                vmmap(new_pgdir, va, pa, PTE_USER_DATA | PTE_RW);
+            }
+        } else {
+            // Unsupported segment type, free section and ignore.
+            kfree(sec);
+            continue;
+        }
+
+        _insert_into_list(&new_pgdir->section_head, &sec->stnode);
+    }
+    return 0;
+}
+
+/**
+ * @brief Sets up the user stack for the new process image. (Unchanged from previous version)
+ * This function creates the stack section, eagerly allocates its physical pages, and lays out
+ * the arguments (argv) and environment variables (envp) according to the AArch64 ABI.
+ * @return The final stack pointer (sp) on success, or 0 on failure.
+ */
+static u64 setup_user_stack(struct pgdir *pgdir, char *const argv[], char *const envp[])
+{
+    struct section *stack_sec = kalloc(sizeof(struct section));
+    if (stack_sec == NULL) return 0;
+    memset(stack_sec, 0, sizeof(struct section));
+    init_section(stack_sec);
+
+    stack_sec->begin = USER_STACK_TOP - USER_STACK_SIZE;
+    stack_sec->end = USER_STACK_TOP;
+    stack_sec->flags = ST_HEAP;
+    _insert_into_list(&pgdir->section_head, &stack_sec->stnode);
+
+    for (u64 va = stack_sec->begin; va < stack_sec->end; va += PAGE_SIZE) {
+        void *pa = kalloc_page();
+        if (pa == NULL) return 0;
+        memset(pa, 0, PAGE_SIZE);
+        // vmmap is a void function; it panics on failure.
+        vmmap(pgdir, va, pa, PTE_USER_DATA | PTE_RW);
+    }
+
+    u64 sp = USER_STACK_TOP;
+    u64 uargv[MAXARGS + 1];
+    u64 uenvp[MAXARGS + 1];
+    int argc, envc;
+
+    for (argc = 0; argv && argv[argc] && argc < MAXARGS; argc++);
+    for (envc = 0; envp && envp[envc] && envc < MAXARGS; envc++);
+
+    for (int i = envc - 1; i >= 0; i--) {
+        usize len = strlen(envp[i]) + 1;
+        sp = (sp - len) & ~7UL;
+        if (copyout(pgdir, (void *)sp, envp[i], len) < 0) return 0;
+        uenvp[i] = sp;
+    }
+    uenvp[envc] = 0;
+
+    for (int i = argc - 1; i >= 0; i--) {
+        usize len = strlen(argv[i]) + 1;
+        sp = (sp - len) & ~7UL;
+        if (copyout(pgdir, (void *)sp, argv[i], len) < 0) return 0;
+        uargv[i] = sp;
+    }
+    uargv[argc] = 0;
+
+    sp &= ~15UL;
+
+    sp -= (envc + 1) * sizeof(u64);
+    if (copyout(pgdir, (void *)sp, uenvp, (envc + 1) * sizeof(u64)) < 0) return 0;
+
+    sp -= (argc + 1) * sizeof(u64);
+    if (copyout(pgdir, (void *)sp, uargv, (argc + 1) * sizeof(u64)) < 0) return 0;
+
+    sp -= sizeof(u64);
+    u64 argc_val = (u64)argc;
+    if (copyout(pgdir, (void *)sp, &argc_val, sizeof(u64)) < 0) return 0;
+
+    sp &= ~15UL;
+    return sp;
+}
+
+
+/**
+ * @brief Replaces the current process image with a new one. (Main logic mostly unchanged)
+ */
+int execve(const char *path, char *const argv[], char *const envp[])
+{   
+    Elf64_Ehdr ehdr;
+    Inode *ip = NULL;
+    Proc *p = thisproc();
+    struct pgdir new_pgdir, old_pgdir;
+    OpContext ctx;
+    u64 sp;
+
+    bcache.begin_op(&ctx);
+
+    if ((ip = namei(path, &ctx)) == NULL) {
+        bcache.end_op(&ctx);
+        return -1;
+    }
+    inodes.lock(ip);
+
+    if (inodes.read(ip, (u8 *)&ehdr, 0, sizeof(ehdr)) != sizeof(ehdr) ||
+        strncmp((char *)ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
+        ehdr.e_type != ET_EXEC || ehdr.e_machine != EM_AARCH64) {
+        goto fail;
+    }
+
+    init_pgdir(&new_pgdir);
+    init_sections(&new_pgdir.section_head);
+
+    if (load_elf_segments(ip, &ehdr, &new_pgdir) < 0)
+        goto fail_pgdir;
+    
+    // Inode is no longer needed after load_elf_segments has set up file-backing info.
+    inodes.unlock(ip);
+    inodes.put(&ctx, ip);
+    ip = NULL;
+
+    sp = setup_user_stack(&new_pgdir, argv, envp);
+    if (sp == 0)
+        goto fail_pgdir;
+
+    // --- Critical Section: Atomically switch address space ---
+    old_pgdir = p->pgdir;
+
+    if (_empty_list(&p->pgdir.section_head)) {
+        init_list_node(&old_pgdir.section_head);
+    } else {
+        old_pgdir.section_head.next = p->pgdir.section_head.next;
+        old_pgdir.section_head.prev = p->pgdir.section_head.prev;
+        old_pgdir.section_head.next->prev = &old_pgdir.section_head;
+        old_pgdir.section_head.prev->next = &old_pgdir.section_head;
+    }
+
+    p->pgdir = new_pgdir;
+
+    if (!_empty_list(&p->pgdir.section_head)) {
+        p->pgdir.section_head.next->prev = &p->pgdir.section_head;
+        p->pgdir.section_head.prev->next = &p->pgdir.section_head;
+    }
+    attach_pgdir(&p->pgdir);
+    // --- End of Critical Section ---
+
+    p->ucontext->elr = ehdr.e_entry;
+    p->ucontext->sp = sp;
+
+    // Now it is safe to free the old address space.
+    free_sections(&old_pgdir);
+    free_pgdir(&old_pgdir);
+    
+    bcache.end_op(&ctx);
+    return 0;
+
+fail_pgdir:
+    free_sections(&new_pgdir);
+    free_pgdir(&new_pgdir);
+
+fail:
+    if(ip) {
+        inodes.unlock(ip);
+        inodes.put(&ctx, ip);
+    }
+    bcache.end_op(&ctx);
+    return -1;
+}

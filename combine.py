@@ -71,17 +71,18 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     # 定义要合并的文件路径
     files_to_merge = [
-        # "src/kernel/sched.c",
-        # "src/kernel/proc.h",
-        # "src/kernel/proc.c",
+        "src/kernel/sched.c",
+        "src/kernel/sched.h",
+        "src/kernel/proc.h",
+        "src/kernel/proc.c",
         # "src/kernel/cpu.h",
         # "src/kernel/cpu.c",
         # "src/kernel/pt.c",
-        "src/fs/inode.h",
-        "src/fs/inode.c",
-        "src/fs/cache.h",
-        "src/fs/cache.c",
-        "src/fs/test/inode_test.cpp",
+        # "src/fs/inode.h",
+        # "src/fs/inode.c",
+        # "src/fs/cache.h",
+        # "src/fs/cache.c",
+        # "src/fs/test/inode_test.cpp",
         # "src/driver/virtio_blk.c",
         # "src/common/sem.h",
         # "src/common/buf.h"

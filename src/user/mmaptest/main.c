@@ -45,7 +45,9 @@ void err(char *why)
 void _v1(char *p)
 {
     int i;
+    // printf("entering _v1\n");
     for (i = 0; i < PGSIZE * 2; i++) {
+        // printf("i = %d\n",i);
         if (i < PGSIZE + (PGSIZE / 2)) {
             if (p[i] != 'A') {
                 printf("mismatch at %d, wanted 'A', got 0x%x\n", i, p[i]);
@@ -117,9 +119,12 @@ void mmap_test(void)
     // offset in the file.
     //
     char *p = mmap(0, PGSIZE * 2, PROT_READ, MAP_PRIVATE, fd, 0);
+    printf("USER: p's address is 0x%llx\n", (unsigned long long)p);
     if (p == MAP_FAILED)
         err("mmap (1)");
+    printf("mmap not failed.\n");
     _v1(p);
+    
     if (munmap(p, PGSIZE * 2) == -1)
         err("munmap (1)");
 
