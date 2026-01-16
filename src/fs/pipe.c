@@ -78,6 +78,9 @@ void pipe_close(Pipe *pi, int writable)
     /* (Final) TODO BEGIN */
     acquire_spinlock(&pi->lock);
     
+    // printk("[PIPE] PID=%d closing %s end, pipe=%p, readopen=%d, writeopen=%d\n",
+    //        thisproc()->pid, writable ? "write" : "read", pi, pi->readopen, pi->writeopen);
+    
     if (writable) {
         pi->writeopen = 0;
         post_all_sem(&pi->rlock);  // 唤醒所有等待读取的进程
@@ -86,10 +89,14 @@ void pipe_close(Pipe *pi, int writable)
         post_all_sem(&pi->wlock);  // 唤醒所有等待写入的进程
     }
     
+    printk("[PIPE] After close: readopen=%d, writeopen=%d\n", pi->readopen, pi->writeopen);
+    
     // 如果读端和写端都关闭了，释放管道
     if (pi->readopen == 0 && pi->writeopen == 0) {
+        
         release_spinlock(&pi->lock);
         kfree(pi);
+        // printk("[PIPE] Freeing pipe %p\n", pi);
     } else {
         release_spinlock(&pi->lock);
     }
@@ -147,15 +154,21 @@ int pipe_read(Pipe *pi, u64 addr, int n)
     
     acquire_spinlock(&pi->lock);
     
+    // printk("[PIPE] PID=%d reading, pipe=%p, nread=%d, nwrite=%d, writeopen=%d\n",
+    //        pr->pid, pi, pi->nread, pi->nwrite, pi->writeopen);
+    
     // 等待管道中有数据或写端关闭
     while (pi->nread == pi->nwrite && pi->writeopen) {
         if (pr->killed) {
             release_spinlock(&pi->lock);
             return -1;
         }
+        // printk("[PIPE] PID=%d waiting for data (writeopen=%d)\n", pr->pid, pi->writeopen);
         release_spinlock(&pi->lock);
         wait_sem(&pi->rlock);  // 等待数据
         acquire_spinlock(&pi->lock);
+        // printk("[PIPE] PID=%d woke up, nread=%d, nwrite=%d, writeopen=%d\n",
+        //        pr->pid, pi->nread, pi->nwrite, pi->writeopen);
     }
     
     // 读取数据
@@ -176,6 +189,7 @@ int pipe_read(Pipe *pi, u64 addr, int n)
     post_all_sem(&pi->wlock);  // 唤醒等待写入的进程
     release_spinlock(&pi->lock);
     
+    // printk("[PIPE] PID=%d read %d bytes\n", pr->pid, i);
     return i;
     /* (Final) TODO END */
 }

@@ -158,6 +158,8 @@ NO_RETURN void exit(int code)
 {
     Proc *this = thisproc();
 
+    // printk("[EXIT] PID=%d exiting with code %d\n", this->pid, code);
+    
     // 1. 清理文件等资源
     if(this->cwd) {
         // decrement_rc(&this->cwd->rc);
@@ -167,12 +169,16 @@ NO_RETURN void exit(int code)
         bcache.end_op(&ctx);
         this->cwd = NULL;
     }
+    
+    // printk("[EXIT] PID=%d closing file descriptors\n", this->pid);
     for (int i = 0; i < NOFILE; i++) {
         if (this->oftable.files[i]) {
+            // printk("[EXIT] PID=%d closing fd[%d]\n", this->pid, i);
             file_close(this->oftable.files[i]);
             this->oftable.files[i] = 0;
         }
     }
+    // printk("[EXIT] PID=%d all fds closed\n", this->pid);
     
     acquire_spinlock(&global_process_lock);
 
@@ -189,18 +195,20 @@ NO_RETURN void exit(int code)
             post_sem(&root_proc.childexit);
         }
     }
-
-    // 3. 设置退出码并通知父进程
-    this->exitcode = code;
-    post_sem(&this->parent->childexit);
-
-    release_spinlock(&global_process_lock);
     free_sections(&this->pgdir);
 
     free_pgdir(&this->pgdir);
     this->pgdir.pt = NULL; // 确保指针被清空
-    // 4. 进入僵尸状态并调度
+    // 3. 设置退出码并通知父进程
+    this->exitcode = code;
+    
+    post_sem(&this->parent->childexit);
+
     acquire_sched_lock();
+    release_spinlock(&global_process_lock);
+
+    // 4. 进入僵尸状态并调度
+    
     sched(ZOMBIE);
 
     PANIC(); // sched(ZOMBIE) should not return
@@ -220,6 +228,7 @@ int wait(int *exitcode)
 
         Proc *zombie_child = NULL;
         _for_in_list(node, &this->children) {
+            if (node==&this->children) continue;
             Proc *child = container_of(node, Proc, ptnode);
             if (is_zombie(child)) {
                 zombie_child = child;

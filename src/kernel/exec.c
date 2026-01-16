@@ -278,6 +278,17 @@ int execve(const char *path, char *const argv[], char *const envp[])
     struct pgdir *oldpgdir = &p->pgdir;
     free_pgdir(oldpgdir);
     
+    // printk("[EXEC] PID=%d execve '%s', preserving file descriptors\n", p->pid, path);
+    // 打印当前打开的文件描述符
+    // for (int i = 0; i < NOFILE; i++) {
+    //     if (p->oftable.files[i]) {
+    //         printk("[EXEC]   fd[%d]: type=%d, readable=%d, writable=%d\n",
+    //                i, p->oftable.files[i]->type, 
+    //                p->oftable.files[i]->readable,
+    //                p->oftable.files[i]->writable);
+    //     }
+    // }
+    
     p->ucontext->elr = ehdr.e_entry;
     
     memcpy(&p->pgdir, new_pgdir, sizeof(struct pgdir));
@@ -288,7 +299,7 @@ int execve(const char *path, char *const argv[], char *const envp[])
     
     attach_pgdir(&p->pgdir);
     
-    printk("Exec successfully\n");
+    // printk("Exec successfully\n");
     return 0;
 
 fail:

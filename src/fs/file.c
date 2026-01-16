@@ -8,6 +8,7 @@
 #include <kernel/mem.h>
 #include <fs/pipe.h>
 #include <kernel/printk.h>
+#include <kernel/sched.h>
 // the global file table.
 static struct ftable ftable;
 
@@ -74,15 +75,21 @@ struct file* file_dup(struct file* f) {
 void file_close(struct file* f) {
     /* (Final) TODO BEGIN */
     struct file temp_f;
+    
+    // printk("[FILE] PID=%d closing file: type=%d, ref=%d, readable=%d, writable=%d\n",
+        //    thisproc()->pid, f->type, f->ref, f->readable, f->writable);
+    
     acquire_spinlock(&ftable.lock);
     if (f->ref < 1){
         PANIC();
     }
     f->ref--;
     if (f->ref > 0){
+        // printk("[FILE] PID=%d file still has ref=%d, not closing\n", thisproc()->pid, f->ref);
         release_spinlock(&ftable.lock);
         return; 
     }
+    // printk("[FILE] PID=%d ref=0, closing for real\n", thisproc()->pid);
     temp_f=*f;
     f->type=FD_NONE;
     f->ref=0;
@@ -91,14 +98,19 @@ void file_close(struct file* f) {
     f->off=0;
     release_spinlock(&ftable.lock);
     if (temp_f.type == FD_INODE){
+        // printk("[FILE] PID=%d closing inode\n", thisproc()->pid);
         OpContext ctx;
         bcache.begin_op(&ctx);
         inodes.put(&ctx, temp_f.ip);
         bcache.end_op(&ctx);
+        // printk("[FILE] PID=%d inode closed\n", thisproc()->pid);
         
     } else if (temp_f.type == FD_PIPE){
+        // printk("[FILE] PID=%d closing pipe, writable=%d\n", thisproc()->pid, temp_f.writable);
         pipe_close(temp_f.pipe, temp_f.writable);
+        // printk("[FILE] PID=%d pipe closed\n", thisproc()->pid);
     }
+    // printk("[FILE] PID=%d file_close complete\n", thisproc()->pid);
     /* (Final) TODO END */
 }
 
