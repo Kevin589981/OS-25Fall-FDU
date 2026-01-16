@@ -35,6 +35,16 @@ void syscall_entry(UserContext *context)
     }
     void *func=syscall_table[syscall_id];
     if (func==NULL){
+        // printk("\n===== ERROR: Undefined Syscall =====\n");
+        // printk("Syscall ID: %lld\n", syscall_id);
+        // printk("PID: %d\n", thisproc()->pid);
+        // printk("Arguments:\n");
+        // printk("  x0=0x%llx  x1=0x%llx  x2=0x%llx\n", 
+        //        context->x[0], context->x[1], context->x[2]);
+        // printk("  x3=0x%llx  x4=0x%llx  x5=0x%llx\n", 
+        //        context->x[3], context->x[4], context->x[5]);
+        // printk("Return address (elr): 0x%llx\n", context->elr);
+        // printk("====================================\n");
         PANIC();
     }
     typedef u64 (*func_call)(u64,u64,u64,u64,u64,u64);

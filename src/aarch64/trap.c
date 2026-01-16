@@ -42,6 +42,20 @@ void trap_global_handler(UserContext *context)
         }
     } break;
     case ESR_EC_SVC64: {
+        // if (context->x[8]==62){
+        //     printk("\n===== DEBUG: Syscall 62 Detected =====\n");
+        //     printk("PID: %d\n", thisproc()->pid);
+        //     printk("Process name: %d\n", thisproc()->pid);
+        //     printk("ELR (return addr): 0x%llx\n", arch_get_elr());
+        //     printk("Registers:\n");
+        //     printk("  x0=0x%llx  x1=0x%llx  x2=0x%llx  x3=0x%llx\n", 
+        //            context->x[0], context->x[1], context->x[2], context->x[3]);
+        //     printk("  x4=0x%llx  x5=0x%llx  x6=0x%llx  x7=0x%llx\n", 
+        //            context->x[4], context->x[5], context->x[6], context->x[7]);
+        //     printk("  x8=0x%llx (syscall_id)\n", context->x[8]);
+        //     printk("  sp=0x%llx  lr=0x%llx\n", context->sp, context->elr);
+        //     printk("=======================================\n\n");
+        // }
         syscall_entry(context);
     } break;
     case ESR_EC_IABORT_EL0:

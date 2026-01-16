@@ -120,6 +120,46 @@ define_syscall(write, int fd, char *buffer, int size)
     return file_write(f, buffer, size);
 }
 
+define_syscall(lseek, int fd, i64 offset, int whence)
+{
+    struct file *f = fd2file(fd);
+    if (!f)
+        return -1;
+    
+    // lseek is not meaningful for pipes
+    if (f->type == FD_PIPE)
+        return -1;
+    
+    i64 new_off;
+    switch (whence) {
+    case SEEK_SET:
+        new_off = offset;
+        break;
+    case SEEK_CUR:
+        new_off = f->off + offset;
+        break;
+    case SEEK_END:
+        // For SEEK_END, we would need the file size
+        // This requires inode operations
+        if (f->type == FD_INODE) {
+            inodes.lock(f->ip);
+            new_off = f->ip->entry.num_bytes + offset;
+            inodes.unlock(f->ip);
+        } else {
+            return -1;
+        }
+        break;
+    default:
+        return -1;
+    }
+    
+    if (new_off < 0)
+        return -1;
+    
+    f->off = new_off;
+    return new_off;
+}
+
 define_syscall(writev, int fd, struct iovec *iov, int iovcnt)
 {
     struct file *f = fd2file(fd);

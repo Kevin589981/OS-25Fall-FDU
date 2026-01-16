@@ -155,8 +155,34 @@ int pgfault_handler(u64 iss)
     Proc *p = thisproc();
     struct pgdir *pd = &p->pgdir;
     u64 fault_addr = arch_get_far();
+    
+    // printk("\n=== PAGE FAULT ===\n");
+    // printk("pid=%d fault_addr=%llx iss=%llx\n", 
+    //        p->pid, (unsigned long long)fault_addr, (unsigned long long)iss);
+    
+    acquire_spinlock(&pd->lock);
+    
+    // 调试：打印所有 section
+    // int sec_count = 0;
+    // printk("Sections:\n");
+    // _for_in_list(node, &pd->section_head)
+    // {
+    //     if (node == &pd->section_head) continue;
+    //     Section *s = container_of(node, Section, stnode);
+    //     printk("  [%d] [%llx, %llx) flags=%llx fp=%p\n", 
+    //            sec_count++, (unsigned long long)s->begin, 
+    //            (unsigned long long)s->end, s->flags, s->fp);
+    // }
+    // printk("Total sections: %d\n", sec_count);
     Section *fault_sec = lookup_section(pd, fault_addr);
-    ASSERT(fault_sec);
+    
+    if (!fault_sec) {
+        // 非法访问，没有对应的 section
+        release_spinlock(&pd->lock);
+        // printk("pgfault: no section for addr %llx\n", (unsigned long long)fault_addr);
+        PANIC();
+        return -1; // 返回 -1 会导致进程被杀死
+    }
 
     u64 fsc = iss & FAULT_STATUS_CODE_MASK;
     switch (fsc)
@@ -206,8 +232,41 @@ int pgfault_handler(u64 iss)
                 fault_sec->fp = NULL;
             }
             break;
+        case ST_FILE:
+            // 处理 mmap 的文件映射（按需加载）
+            if (fault_sec->fp && fault_sec->length > 0) {
+                void *pg = kalloc_page();
+                memset(pg, 0, PAGE_SIZE); // 清零
+                
+                // 计算页内偏移
+                u64 page_base = fault_addr & ~(PAGE_SIZE - 1);
+                u64 offset_in_section = page_base - fault_sec->begin;
+                u64 file_offset = fault_sec->offset + offset_in_section;
+                
+                // 读取文件内容到页
+                fault_sec->fp->off = file_offset;
+                u64 remaining = fault_sec->length > offset_in_section ? 
+                                fault_sec->length - offset_in_section : 0;
+                usize bytes_to_read = (usize)MIN((u64)PAGE_SIZE, remaining);
+                if (bytes_to_read > 0) {
+                    isize read_bytes = file_read(fault_sec->fp, (char *)pg, bytes_to_read);
+                    if (read_bytes < 0) {
+                        kfree_page(pg);
+                        exit(-1);
+                    }
+                }
+                
+                // 映射页表（可写）
+                vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
+            } else {
+                // 匿名映射，直接分配零页
+                void *pg = kalloc_page();
+                memset(pg, 0, PAGE_SIZE);
+                vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
+            }
+            break;
         default:
-            printk("The section type is unknown.\n");
+            printk("The section type is unknown: %llx\n", (unsigned long long)fault_sec->flags);
             PANIC();
         }
         break;
@@ -223,7 +282,8 @@ int pgfault_handler(u64 iss)
     case PERMISSION_FAULT_3:
         // Handle permission fault (COW)
         {
-            ASSERT(fault_sec->flags == ST_DATA || fault_sec->flags == ST_USTACK || fault_sec->flags == ST_HEAP);
+            ASSERT(fault_sec->flags == ST_DATA || fault_sec->flags == ST_USTACK || 
+                   fault_sec->flags == ST_HEAP || fault_sec->flags == ST_FILE);
             PTEntriesPtr pte = get_pte(pd, fault_addr, false);
             void *pg = kalloc_page();
             memcpy(pg, (void *)P2K(PTE_ADDRESS(*pte)), PAGE_SIZE);
@@ -236,6 +296,7 @@ int pgfault_handler(u64 iss)
     }
     release_spinlock(&pd->lock);
     arch_tlbi_vmalle1is();
+    // printk("pgfault handled.\n");
     return 1;
 }
 

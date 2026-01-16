@@ -12,6 +12,7 @@
 struct disk {
     SpinLock lk;
     struct virtq virtq;
+    Semaphore desc_sem;  // 用于等待描述符可用
 } disk;
 
 static void desc_init(struct virtq *virtq)
@@ -80,6 +81,12 @@ int virtio_blk_rw(Buf *b)
     hdr.sector = sector;
 
     acquire_spinlock(&disk.lk);
+    // 等待有足够的描述符可用（需要 3 个）
+    while (disk.virtq.nfree < 3) {
+        release_spinlock(&disk.lk);
+        unalertable_wait_sem(&disk.desc_sem);
+        acquire_spinlock(&disk.lk);
+    }
     // 3个描述符，依次表示指令是什么，指示数据的目标内存地址，返回结果成功还是失败
     int d0 = alloc_desc(&disk.virtq);
     if (d0 < 0)
@@ -127,6 +134,8 @@ int virtio_blk_rw(Buf *b)
 
     disk.virtq.info[d0].done = 0;
     free_desc(&disk.virtq, d0);
+    // 唤醒等待描述符的进程
+    post_all_sem(&disk.desc_sem);
     release_spinlock(&disk.lk);
     return 0;
 }
@@ -264,4 +273,5 @@ void virtio_init()
 
     set_interrupt_handler(VIRTIO_BLK_IRQ, virtio_blk_intr);
     init_spinlock(&disk.lk);
+    init_sem(&disk.desc_sem, 0);  // 初始化描述符等待信号量
 }
