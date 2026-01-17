@@ -20,8 +20,7 @@ void *syscall_table[NR_SYSCALL] = {
     [SYS_myreport] = (void *)syscall_myreport,
 };
 
-void syscall_entry(UserContext *context)
-{
+void syscall_entry(UserContext *context){
 #ifdef lab3_debug1
     printk("syscall.c:18 \n");
 #endif
@@ -63,12 +62,10 @@ void syscall_entry(UserContext *context)
 
 }
 
-bool user_accessible(const void *start, usize size, bool check_writeable)
-{
+bool user_accessible(const void *start, usize size, bool check_writeable){
     bool ret = false;
     ListNode head = thisproc()->pgdir.section_head;
-    _for_in_list(node, &head)
-    {
+    _for_in_list(node, &head){
         if (node == &head) continue;
         Section* st = container_of(node, Section, stnode);
         

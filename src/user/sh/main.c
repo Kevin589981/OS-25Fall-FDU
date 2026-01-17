@@ -173,7 +173,7 @@ int main(int argc, char *argv[])
         printf("sh: testenv not found!\n");
     }
 
-    static char buf[100];
+    static char buf[1000];
     int fd;
 
     // Ensure that three file descriptors are open.

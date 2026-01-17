@@ -15,6 +15,7 @@ static void cat_fd(int fd, const char *name)
             fprintf(stderr, "cat: write error\n");
             exit(1);
         }
+        // fprintf(stderr, "cat write succ\n");
     }
     
     if (n < 0) {
