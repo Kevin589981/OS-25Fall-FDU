@@ -309,7 +309,22 @@ void copy_sections(ListNode *from_head, ListNode *to_head)
         Section *from_sec = container_of(node, Section, stnode);
         Section *to_sec = (Section*)kalloc(sizeof(Section));
         if (!to_sec) PANIC();
-        memcpy(to_sec, from_sec, sizeof(Section));
+        
+        // 初始化新 section
+        init_section(to_sec);
+        
+        // 复制基本字段
+        to_sec->begin = from_sec->begin;
+        to_sec->end = from_sec->end;
+        to_sec->flags = from_sec->flags;
+        to_sec->offset = from_sec->offset;
+        to_sec->length = from_sec->length;
+        
+        // 如果有文件指针，增加引用计数
+        if (from_sec->fp) {
+            to_sec->fp = file_dup(from_sec->fp);
+        }
+        
         _insert_into_list(to_head, &to_sec->stnode);
     }
     /* (Final) TODO END */

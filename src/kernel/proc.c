@@ -298,27 +298,18 @@ int kill(int pid)
 void copy_page_directory(Proc *parent_proc, Proc *child_proc)
 {
     acquire_spinlock(&parent_proc->pgdir.lock);
-    ListNode *sections_head = &parent_proc->pgdir.section_head;
-
-    _for_in_list(section_node, sections_head)
+    
+    // 使用 copy_sections 复制所有 section
+    copy_sections(&parent_proc->pgdir.section_head, &child_proc->pgdir.section_head);
+    
+    // 遍历子进程的 section，复制页表项并设置 COW
+    _for_in_list(section_node, &child_proc->pgdir.section_head)
     {
-        if (section_node == sections_head) continue;
+        if (section_node == &child_proc->pgdir.section_head) continue;
         
         Section *sec = container_of(section_node, Section, stnode);
-        Section *new_sec = (Section *)kalloc(sizeof(Section));
-        init_section(new_sec);
-        new_sec->begin = sec->begin;
-        new_sec->end = sec->end;
-        new_sec->flags = sec->flags;
-
-        if (sec->fp)
-        {
-            new_sec->fp = file_dup(sec->fp);
-            new_sec->offset = sec->offset;
-            new_sec->length = sec->length;
-        }
-        _insert_into_list(&child_proc->pgdir.section_head, &new_sec->stnode);
-
+        
+        // 遍历该 section 的所有页，复制页表项
         for (u64 va = PAGE_BASE(sec->begin); va < sec->end; va += PAGE_SIZE)
         {
             PTEntriesPtr pte = get_pte(&parent_proc->pgdir, va, false);
