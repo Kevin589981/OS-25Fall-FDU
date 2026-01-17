@@ -283,25 +283,30 @@ void fork_test(void)
     unlink(f);
     printf("fork_test: mmap file\n");
     char *p1 = mmap(0, PGSIZE * 2, PROT_READ, MAP_SHARED, fd, 0);
+    printf("mmaped at %p\n", p1);
     if (p1 == MAP_FAILED)
         err("mmap (4)");
-    char *p2 = mmap(0, PGSIZE * 2, PROT_READ, MAP_SHARED, fd, 0);
+    printf("fork_test: mmap file again\n");
+        char *p2 = mmap(0, PGSIZE * 2, PROT_READ, MAP_SHARED, fd, 0);
+    printf("mmaped at %p\n", p2);
     if (p2 == MAP_FAILED)
         err("mmap (5)");
-
+    printf("fork_test: close file\n");
     // read just 2nd page.
     if (*(p1 + PGSIZE) != 'A')
         err("fork mismatch (1)");
-
+    printf("fork_test: fork\n");
     if ((pid = fork()) < 0)
         err("fork");
+    printf("forked pid=%d\n", pid);
     if (pid == 0) {
         _v1(p1);
+        printf("fork_test: child munmap first page\n");
         munmap(p1, PGSIZE); // just the first page
         printf("fork_test child OK\n");
         exit(0);
     }
-
+    printf("fork_test: pid=%d\n",pid);
     int status = -1; // This status code doesn't work due to our implementation
     wait(&status);
 

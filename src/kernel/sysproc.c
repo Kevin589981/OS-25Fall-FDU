@@ -52,15 +52,19 @@ define_syscall(execve, const char *p, void *argv, void *envp) {
     return execve(p, argv, envp);
 }
 
-define_syscall(wait4, int pid, int options, int *wstatus, void *rusage) {
-    if (pid != -1 || wstatus != 0 || options != 0 || rusage != 0) {
-        printk("sys_wait4: unimplemented. pid %d, wstatus 0x%p, options 0x%x, "
-               "rusage 0x%p\n",
+define_syscall(wait4, int pid, int *wstatus, int options, void *rusage) {
+    if (options != 0 || rusage != 0) {
+        printk("sys_wait4: options/rusage unimplemented. pid %d, wstatus 0x%p, "
+               "options 0x%x, rusage 0x%p\n",
                pid, wstatus, options, rusage);
-        while (1) {
-        }
         return -1;
     }
-    int code;
-    return wait(&code);
+    if (wstatus && !user_writeable(wstatus, sizeof(int)))
+        return -1;
+
+    int code = 0;
+    int ret = wait(&code);
+    if (ret >= 0 && wstatus)
+        *wstatus = code;
+    return ret;
 }
