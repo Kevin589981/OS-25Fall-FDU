@@ -12,6 +12,9 @@
 #define ST_DATA ST_FILE
 #define ST_BSS ST_FILE
 #define ST_USTACK (1 << 4)
+#define ST_MMAP (1 << 5)
+#define ST_SHARED (1 << 6)
+#define ST_MMAP_WRITE (1 << 7)
 
 typedef struct section {
     u64 flags;

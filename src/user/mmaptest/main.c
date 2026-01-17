@@ -34,8 +34,11 @@ int main(int argc, char *argv[])
 char *testname = "???";
 
 void err(char *why)
-{
-    printf("mmaptest: %s failed: %s, pid=%d\n", testname, why, getpid());
+{   
+    printf("entering err.\n");
+    printf("mmaptest: %s \n", testname);
+    printf("mmaptest: %s failed: %s\n", testname, why);
+    // printf("mmaptest: %s failed: %s, pid=%d\n", testname, why, getpid());
     exit(1);
 }
 
@@ -191,13 +194,19 @@ void mmap_test(void)
     // written to the file.
     if ((fd = open(f, O_RDWR)) == -1)
         err("open");
+    // printf("194.\n");
     for (i = 0; i < PGSIZE + (PGSIZE / 2); i++) {
         char b;
+        // printf("197.\n");
         if (read(fd, &b, 1) != 1)
             err("read (1)");
+        // printf("200.\n");
+        // printf("i = %d, b = %c\n", i, b);
         if (b != 'Z')
             err("file does not contain modifications");
+        // printf("203.\n");
     }
+    printf("204.\n");
     if (close(fd) == -1)
         err("close");
 

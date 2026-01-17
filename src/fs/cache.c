@@ -287,6 +287,7 @@ static void cache_sync(OpContext *ctx, Block *block) {
         release_spinlock(&log.lock);
         PANIC();
     }
+    // printk("rm is %lld, minus\n", (u64)ctx->rm);
     ctx->rm--; 
     acquire_spinlock(&lock);
     block->pinned = TRUE;

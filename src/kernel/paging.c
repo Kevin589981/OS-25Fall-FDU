@@ -198,16 +198,14 @@ int pgfault_handler(u64 iss)
     case TRANSLATION_FAULT_2:
     case TRANSLATION_FAULT_3:
         // Handle missing PTE
-        switch (fault_sec->flags)
+        // 使用 if-else 而不是 switch，以支持组合标志位
+        if (fault_sec->flags & ST_HEAP || fault_sec->flags & ST_USTACK)
         {
-        case ST_HEAP:
-        case ST_USTACK:
-            {
-                void *pg = kalloc_page();
-                vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
-            }
-            break;
-        case ST_TEXT:
+            void *pg = kalloc_page();
+            vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
+        }
+        else if (fault_sec->flags == ST_TEXT)
+        {
             if (fault_sec->length == 0) exit(-1);
             {
                 usize total_bytes = fault_sec->length;
@@ -231,9 +229,13 @@ int pgfault_handler(u64 iss)
                 file_close(fault_sec->fp);
                 fault_sec->fp = NULL;
             }
-            break;
-        case ST_FILE:
+        }
+         else if (fault_sec->flags & ST_FILE)
+        {
             // 处理 mmap 的文件映射（按需加载）
+            printk("ST_FILE: fp=%p, length=%llu, offset=%llu\n", 
+                   fault_sec->fp, (unsigned long long)fault_sec->length, 
+                   (unsigned long long)fault_sec->offset);
             if (fault_sec->fp && fault_sec->length > 0) {
                 void *pg = kalloc_page();
                 memset(pg, 0, PAGE_SIZE); // 清零
@@ -243,29 +245,54 @@ int pgfault_handler(u64 iss)
                 u64 offset_in_section = page_base - fault_sec->begin;
                 u64 file_offset = fault_sec->offset + offset_in_section;
                 
-                // 读取文件内容到页
-                fault_sec->fp->off = file_offset;
+                printk("ST_FILE: page_base=%llx, offset_in_section=%llu, file_offset=%llu\n",
+                       (unsigned long long)page_base, (unsigned long long)offset_in_section,
+                       (unsigned long long)file_offset);
+                
                 u64 remaining = fault_sec->length > offset_in_section ? 
                                 fault_sec->length - offset_in_section : 0;
                 usize bytes_to_read = (usize)MIN((u64)PAGE_SIZE, remaining);
+                // printk("ST_FILE: remaining=%llu, bytes_to_read=%llu\n",
+                //        (unsigned long long)remaining, (unsigned long long)bytes_to_read);
                 if (bytes_to_read > 0) {
-                    isize read_bytes = file_read(fault_sec->fp, (char *)pg, bytes_to_read);
+                    // 直接使用 inodes.read 指定偏移量，避免使用 file.off
+                    Inode *ip = fault_sec->fp->ip;
+                    release_spinlock(&pd->lock);
+                    inodes.lock(ip);
+                    isize read_bytes = inodes.read(ip, (u8 *)pg, file_offset, bytes_to_read);
+                    inodes.unlock(ip);
+                    acquire_spinlock(&pd->lock);
+                    printk("ST_FILE: read_bytes=%lld, pg[0]=%c\n", 
+                           (long long)read_bytes, ((char*)pg)[0]);
                     if (read_bytes < 0) {
                         kfree_page(pg);
                         exit(-1);
                     }
                 }
                 
-                // 映射页表（可写）
-                vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
+                // 映射页表（按共享/权限设置）
+                bool mmap_write = (fault_sec->flags & ST_MMAP_WRITE) != 0;
+                bool mmap_shared = (fault_sec->flags & ST_SHARED) != 0;
+                u64 perm = PTE_RO;
+                if (!mmap_write) {
+                    perm = PTE_RO;
+                } else if (mmap_shared) {
+                    perm = PTE_RW;
+                } else {
+                    // MAP_PRIVATE 可写：先映射为只读以触发 COW
+                    perm = PTE_RO;
+                }
+                vmmap(pd, fault_addr, pg, PTE_USER_DATA | perm);
             } else {
+                printk("ST_FILE: anonymous path taken\n");
                 // 匿名映射，直接分配零页
                 void *pg = kalloc_page();
                 memset(pg, 0, PAGE_SIZE);
                 vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
             }
-            break;
-        default:
+        }
+        else
+        {
             printk("The section type is unknown: %llx\n", (unsigned long long)fault_sec->flags);
             PANIC();
         }
@@ -280,15 +307,27 @@ int pgfault_handler(u64 iss)
     case PERMISSION_FAULT_1:
     case PERMISSION_FAULT_2:
     case PERMISSION_FAULT_3:
-        // Handle permission fault (COW)
+        // Handle permission fault (COW or shared write-enable)
         {
             ASSERT(fault_sec->flags == ST_DATA || fault_sec->flags == ST_USTACK || 
-                   fault_sec->flags == ST_HEAP || fault_sec->flags == ST_FILE);
+                   fault_sec->flags == ST_HEAP || fault_sec->flags == ST_FILE ||
+                   (fault_sec->flags & ST_FILE));
             PTEntriesPtr pte = get_pte(pd, fault_addr, false);
-            void *pg = kalloc_page();
-            memcpy(pg, (void *)P2K(PTE_ADDRESS(*pte)), PAGE_SIZE);
-            kfree_page((void *)P2K(PTE_ADDRESS(*pte)));
-            vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
+            if ((fault_sec->flags & ST_MMAP) && !(fault_sec->flags & ST_MMAP_WRITE)) {
+                // mmap 区域不可写
+                release_spinlock(&pd->lock);
+                exit(-1);
+            }
+            if ((fault_sec->flags & ST_MMAP) && (fault_sec->flags & ST_SHARED)) {
+                // MAP_SHARED：不做复制，直接允许写
+                vmmap(pd, fault_addr, (void *)P2K(PTE_ADDRESS(*pte)), PTE_USER_DATA | PTE_RW);
+            } else {
+                // COW
+                void *pg = kalloc_page();
+                memcpy(pg, (void *)P2K(PTE_ADDRESS(*pte)), PAGE_SIZE);
+                kfree_page((void *)P2K(PTE_ADDRESS(*pte)));
+                vmmap(pd, fault_addr, pg, PTE_USER_DATA | PTE_RW);
+            }
         }
         break;
     default:

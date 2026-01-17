@@ -16,6 +16,7 @@
 #include <common/defines.h>
 #include <common/spinlock.h>
 #include <common/string.h>
+#include <fs/cache.h>
 #include <fs/file.h>
 #include <fs/fs.h>
 #include <fs/inode.h>
@@ -103,6 +104,7 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
     // 查找可用的虚拟地址空间
     acquire_spinlock(&pd->lock);
     
+    
     u64 va_start;
     if (addr && (flags & MAP_FIXED)) {
         // 使用指定地址
@@ -162,7 +164,11 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
         sec->fp = file_dup(f);
         sec->offset = offset;
         sec->length = length;
-        sec->flags = ST_FILE;
+        sec->flags = ST_FILE | ST_MMAP;
+        if (flags & MAP_SHARED)
+            sec->flags |= ST_SHARED;
+        if (prot & PROT_WRITE)
+            sec->flags |= ST_MMAP_WRITE;
         
         // MAP_PRIVATE 时，即使文件只读，也可以请求写权限（COW）
         // 只有在真正写入时才会复制页面
@@ -179,16 +185,16 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
     
     release_spinlock(&pd->lock);
     
-    printk("mmap: va=[%llx, %llx) len=%d flags=%llx fd=%d fp=%p\n", 
-           (unsigned long long)va_start, (unsigned long long)sec->end, 
-           length, sec->flags, fd, sec->fp);
+    // printk("mmap: va=[%llx, %llx) len=%d flags=%llx fd=%d fp=%p\n", 
+    //        (unsigned long long)va_start, (unsigned long long)sec->end, 
+    //        length, sec->flags, fd, sec->fp);
     
     // 验证 section 已插入
-    acquire_spinlock(&pd->lock);
-    Section *verify = lookup_section(pd, va_start);
-    release_spinlock(&pd->lock);
-    printk("mmap: verify lookup_section(%llx) = %p\n", 
-           (unsigned long long)va_start, verify);
+    // acquire_spinlock(&pd->lock);
+    // Section *verify = lookup_section(pd, va_start);
+    // release_spinlock(&pd->lock);
+    // printk("mmap: verify lookup_section(%llx) = %p\n", 
+    //        (unsigned long long)va_start, verify);
     
     return va_start;
     /* (Final) TODO END */
@@ -207,47 +213,123 @@ define_syscall(munmap, void *addr, size_t length)
     struct pgdir *pd = &p->pgdir;
     
     acquire_spinlock(&pd->lock);
-    
-    // 查找并删除覆盖该地址范围的 sections
+    int ret = 0;
+    // 查找并处理覆盖该地址范围的 sections
     ListNode *node = pd->section_head.next;
     while (node != &pd->section_head) {
         Section *sec = container_of(node, Section, stnode);
         ListNode *next = node->next;
-        
+
+        u64 sec_begin = sec->begin;
+        u64 sec_end = sec->end;
+        u64 unmap_start = va_start > sec_begin ? va_start : sec_begin;
+        u64 unmap_end = va_end < sec_end ? va_end : sec_end;
+
         // 检查是否有重叠
-        if (!(va_end <= sec->begin || va_start >= sec->end)) {
-            // 简化处理：如果完全覆盖，删除整个 section
-            if (va_start <= sec->begin && va_end >= sec->end) {
-                // 释放该 section 占用的物理页
-                for (u64 va = sec->begin; va < sec->end; va += PAGE_SIZE) {
-                    PTEntriesPtr pte = get_pte(pd, va, false);
-                    if (pte && (*pte & PTE_VALID)) {
-                        void *pa = (void *)P2K(PTE_ADDRESS(*pte));
-                        kfree_page(pa);
-                        *pte = 0;
+        if (unmap_start < unmap_end) {
+            bool do_writeback = (sec->flags & ST_FILE) && (sec->flags & ST_SHARED) && sec->fp;
+
+            // 写回并释放覆盖范围内的页
+            for (u64 va = unmap_start; va < unmap_end; va += PAGE_SIZE) {
+                PTEntriesPtr pte = get_pte(pd, va, false);
+                if (pte && (*pte & PTE_VALID)) {
+                    u64 pa = PTE_ADDRESS(*pte);
+                    if (do_writeback) {
+                        u64 offset_in_sec = va - sec_begin;
+                        u64 file_offset = sec->offset + offset_in_sec;
+                        u64 remaining = sec->length > offset_in_sec ? sec->length - offset_in_sec : 0;
+                        usize bytes_to_write = remaining < PAGE_SIZE ? (usize)remaining : PAGE_SIZE;
+                        usize written = 0;
+                        while (written < bytes_to_write) {
+                            usize max_chunk = (OP_MAX_NUM_BLOCKS - 5) *BLOCK_SIZE;
+                            usize chunk = bytes_to_write - written;
+                            if (chunk > max_chunk)
+                                chunk = max_chunk;
+                            release_spinlock(&pd->lock);
+                            OpContext ctx;
+                            bcache.begin_op(&ctx);
+                            Inode *ip = sec->fp->ip;
+                            inodes.lock(ip);
+                            isize r = inodes.write(&ctx, ip,
+                                                   (u8 *)P2K(pa) + written,
+                                                   file_offset + written,
+                                                   chunk);
+                            inodes.unlock(ip);
+                            bcache.end_op(&ctx);
+                            acquire_spinlock(&pd->lock);
+                            if (r != (isize)chunk) {
+                                ret = -1;
+                                break;
+                            }
+                            written += chunk;
+                        }
+                        if (ret != 0)
+                            break;
                     }
+                    kfree_page((void *)P2K(pa));
+                    *pte = 0;
                 }
-                
-                // 关闭文件
+            }
+
+            // 完全覆盖：删除整个 section
+            if (unmap_start <= sec_begin && unmap_end >= sec_end) {
                 if (sec->fp) {
                     file_close(sec->fp);
                 }
-                
-                // 从链表中移除
                 _detach_from_list(&sec->stnode);
                 kfree(sec);
+            } else if (unmap_start == sec_begin) {
+                // 从开头缩小
+                sec->begin = unmap_end;
+                if (sec->flags & ST_FILE) {
+                    u64 delta = unmap_end - sec_begin;
+                    sec->offset += delta;
+                    sec->length = sec->length > delta ? sec->length - delta : 0;
+                }
+            } else if (unmap_end == sec_end) {
+                // 从结尾缩小
+                sec->end = unmap_start;
+                if (sec->flags & ST_FILE) {
+                    u64 delta = sec_end - unmap_start;
+                    sec->length = sec->length > delta ? sec->length - delta : 0;
+                }
+            } else {
+                // 中间拆分为左右两个 section
+                Section *right = (Section *)kalloc(sizeof(Section));
+                if (!right) {
+                    ret = -1;
+                    break;
+                }
+                init_section(right);
+                right->begin = unmap_end;
+                right->end = sec_end;
+                right->flags = sec->flags;
+                if (sec->flags & ST_FILE) {
+                    u64 delta = unmap_end - sec_begin;
+                    right->offset = sec->offset + delta;
+                    right->length = sec->length > delta ? sec->length - delta : 0;
+                    right->fp = sec->fp ? file_dup(sec->fp) : NULL;
+                }
+
+                sec->end = unmap_start;
+                if (sec->flags & ST_FILE) {
+                    u64 left_len = unmap_start - sec_begin;
+                    sec->length = left_len;
+                }
+
+                _insert_into_list(&sec->stnode, &right->stnode);
             }
-            // 部分覆盖的情况比较复杂，这里简化处理
-            // 实际实现可能需要拆分 section
         }
-        
+
         node = next;
+        if (ret != 0)
+            break;
     }
-    
+
     release_spinlock(&pd->lock);
     arch_tlbi_vmalle1is();
-    
-    return 0;
+
+    return ret;
     /* (Final) TODO END */
 }
 
