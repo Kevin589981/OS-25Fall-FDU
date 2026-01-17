@@ -270,6 +270,7 @@ Proc *find_proc_by_pid(Proc* current, int pid)
     if (current->pid == pid && !is_unused(current)) return current;
     
     _for_in_list(node, &current->children) {
+        if (node==&current->children) continue;
         Proc *child = container_of(node, Proc, ptnode);
         Proc *found = find_proc_by_pid(child, pid);
         if (found) return found;
