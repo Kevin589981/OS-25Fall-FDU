@@ -62,39 +62,25 @@ void syscall_entry(UserContext *context){
 
 }
 
-bool user_accessible(const void *start, usize size, bool check_writeable){
-    bool ret = false;
-    ListNode head = thisproc()->pgdir.section_head;
-    _for_in_list(node, &head){
-        if (node == &head) continue;
-        Section* st = container_of(node, Section, stnode);
-        
-        if (st->begin <= (u64)start && ((u64)start + size) <= st->end)
-        {
-            if (check_writeable)
-            {
-                if (st->flags != ST_TEXT)
-                {
-                    ret = true;
-                }
-            }
-            else
-            {
-                ret = true;
-            }
-            break;
-        }
-    }
-    return ret;
-}
-
 /** 
  * Check if the virtual address [start,start+size) is READABLE by the current
  * user process.
  */
 bool user_readable(const void *start, usize size) {
     /* (Final) TODO BEGIN */
-    return user_accessible(start, size, false);
+    bool ret = false;
+    ListNode head = thisproc()->pgdir.section_head;
+    _for_in_list(node, &head) {
+        if (node == &head) continue;
+        Section* st = container_of(node, Section, stnode);
+        
+        // 检查地址范围是否在当前 Section 内
+        if (st->begin <= (u64)start && ((u64)start + size) <= st->end) {
+            ret = true;
+            break;
+        }
+    }
+    return ret;
     /* (Final) TODO END */
 }
 
@@ -105,7 +91,22 @@ bool user_readable(const void *start, usize size) {
  */
 bool user_writeable(const void *start, usize size) {
     /* (Final) TODO Begin */
-    return user_accessible(start, size, true);
+    bool ret = false;
+    ListNode head = thisproc()->pgdir.section_head;
+    _for_in_list(node, &head) {
+        if (node == &head) continue;
+        Section* st = container_of(node, Section, stnode);
+        
+        // 检查地址范围是否在当前 Section 内
+        if (st->begin <= (u64)start && ((u64)start + size) <= st->end) {
+            // 额外检查是否具有写权限（即不是 ST_TEXT 段）
+            if (st->flags != ST_TEXT) {
+                ret = true;
+            }
+            break;
+        }
+    }
+    return ret;
     /* (Final) TODO End */
 }
 
