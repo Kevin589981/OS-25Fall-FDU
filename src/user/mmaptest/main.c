@@ -122,10 +122,10 @@ void mmap_test(void)
     // offset in the file.
     //
     char *p = mmap(0, PGSIZE * 2, PROT_READ, MAP_PRIVATE, fd, 0);
-    printf("USER: p's address is 0x%llx\n", (unsigned long long)p);
+    // printf("USER: p's address is 0x%llx\n", (unsigned long long)p);
     if (p == MAP_FAILED)
         err("mmap (1)");
-    printf("mmap not failed.\n");
+    // printf("mmap not failed.\n");
     _v1(p);
     
     if (munmap(p, PGSIZE * 2) == -1)
@@ -206,7 +206,7 @@ void mmap_test(void)
             err("file does not contain modifications");
         // printf("203.\n");
     }
-    printf("204.\n");
+    // printf("204.\n");
     if (close(fd) == -1)
         err("close");
 
@@ -279,7 +279,9 @@ void fork_test(void)
     makefile(f);
     if ((fd = open(f, O_RDONLY)) == -1)
         err("open");
+    printf("opened file fd=%d\n", fd);
     unlink(f);
+    printf("fork_test: mmap file\n");
     char *p1 = mmap(0, PGSIZE * 2, PROT_READ, MAP_SHARED, fd, 0);
     if (p1 == MAP_FAILED)
         err("mmap (4)");

@@ -233,9 +233,9 @@ int pgfault_handler(u64 iss)
          else if (fault_sec->flags & ST_FILE)
         {
             // 处理 mmap 的文件映射（按需加载）
-            printk("ST_FILE: fp=%p, length=%llu, offset=%llu\n", 
-                   fault_sec->fp, (unsigned long long)fault_sec->length, 
-                   (unsigned long long)fault_sec->offset);
+            // printk("ST_FILE: fp=%p, length=%llu, offset=%llu\n", 
+            //        fault_sec->fp, (unsigned long long)fault_sec->length, 
+            //        (unsigned long long)fault_sec->offset);
             if (fault_sec->fp && fault_sec->length > 0) {
                 void *pg = kalloc_page();
                 memset(pg, 0, PAGE_SIZE); // 清零
@@ -245,9 +245,9 @@ int pgfault_handler(u64 iss)
                 u64 offset_in_section = page_base - fault_sec->begin;
                 u64 file_offset = fault_sec->offset + offset_in_section;
                 
-                printk("ST_FILE: page_base=%llx, offset_in_section=%llu, file_offset=%llu\n",
-                       (unsigned long long)page_base, (unsigned long long)offset_in_section,
-                       (unsigned long long)file_offset);
+                // printk("ST_FILE: page_base=%llx, offset_in_section=%llu, file_offset=%llu\n",
+                //        (unsigned long long)page_base, (unsigned long long)offset_in_section,
+                //        (unsigned long long)file_offset);
                 
                 u64 remaining = fault_sec->length > offset_in_section ? 
                                 fault_sec->length - offset_in_section : 0;
@@ -262,8 +262,8 @@ int pgfault_handler(u64 iss)
                     isize read_bytes = inodes.read(ip, (u8 *)pg, file_offset, bytes_to_read);
                     inodes.unlock(ip);
                     acquire_spinlock(&pd->lock);
-                    printk("ST_FILE: read_bytes=%lld, pg[0]=%c\n", 
-                           (long long)read_bytes, ((char*)pg)[0]);
+                    // printk("read_bytes=%lld, pg[0]=%c\n", 
+                    //        (long long)read_bytes, ((char*)pg)[0]);
                     if (read_bytes < 0) {
                         kfree_page(pg);
                         exit(-1);
@@ -284,7 +284,7 @@ int pgfault_handler(u64 iss)
                 }
                 vmmap(pd, fault_addr, pg, PTE_USER_DATA | perm);
             } else {
-                printk("ST_FILE: anonymous path taken\n");
+                // printk("ST_FILE: anonymous path taken\n");
                 // 匿名映射，直接分配零页
                 void *pg = kalloc_page();
                 memset(pg, 0, PAGE_SIZE);

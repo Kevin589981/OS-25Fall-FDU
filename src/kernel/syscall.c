@@ -56,9 +56,9 @@ void syscall_entry(UserContext *context)
                 context->x[4],
                 context->x[5]);
     context->x[0]=x0;
-    if (syscall_id==SYS_mmap){
-        printk("x0 is %llx, context x0 is %llx\n", x0, context->x[0]);
-    }
+    // if (syscall_id==SYS_mmap){
+    //     printk("x0 is %llx, context x0 is %llx\n", x0, context->x[0]);
+    // }
     
 
 }
