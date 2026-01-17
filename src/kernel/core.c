@@ -45,8 +45,6 @@ NO_RETURN void kernel_entry()
     // vm_test();
     // user_proc_test();
     // io_test();
-    // pgfault_first_test();
-    // pgfault_second_test();
 
     /* LAB 4 TODO 3 BEGIN */
     Buf mbr_buf;

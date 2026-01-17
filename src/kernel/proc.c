@@ -2,7 +2,7 @@
 #include <kernel/mem.h>
 #include <kernel/sched.h>
 #include <aarch64/mmu.h>
-#include <aarch64/intrinsic.h> // <--- 修正1：添加此头文件以声明 flush_tlb_all
+#include <aarch64/intrinsic.h> 
 #include <common/list.h>
 #include <common/string.h>
 #include <kernel/printk.h>
