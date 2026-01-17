@@ -520,7 +520,8 @@ define_syscall(unlinkat, int fd, const char *path, int flag)
     }
 
     memset(&de, 0, sizeof(de));
-    if (inodes.write(&ctx, dp, (u8 *)&de, off, sizeof(de)) != sizeof(de))
+    usize off_bytes = off * sizeof(DirEntry);
+    if (inodes.write(&ctx, dp, (u8 *)&de, off_bytes, sizeof(de)) != sizeof(de))
         PANIC();
     if (ip->entry.type == INODE_DIRECTORY) {
         dp->entry.num_links--;
