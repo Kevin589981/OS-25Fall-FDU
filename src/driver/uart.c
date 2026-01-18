@@ -1,5 +1,5 @@
 #include <aarch64/intrinsic.h>
-#include <driver/aux.h>
+#include <driver/auxiliary.h>
 #include <driver/gpio.h>
 #include <driver/uart.h>
 #include <driver/interrupt.h>
