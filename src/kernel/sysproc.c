@@ -55,6 +55,7 @@ define_syscall(execve, const char *p, void *argv, void *envp) {
 }
 
 define_syscall(wait4, int pid, int *wstatus, int options, void *rusage) {
+    // printk("sys_wait4: called.\n");
     if (options != 0 || rusage != 0) {
         printk("sys_wait4: options/rusage unimplemented. pid %d, wstatus 0x%p, "
                "options 0x%x, rusage 0x%p\n",

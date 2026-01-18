@@ -41,8 +41,7 @@ struct iovec {
 /** 
  * Get the file object by fd. Return null if the fd is invalid.
  */
-static struct file *fd2file(int fd)
-{
+static struct file *fd2file(int fd){
     /* (Final) TODO BEGIN */
     Proc *p=thisproc();
     if (fd<0||fd>=NOFILE){
@@ -84,7 +83,7 @@ define_syscall(mmap, void *addr, int length, int prot, int flags, int fd,
                int offset)
 {
     /* (Final) TODO BEGIN */
-    // return 2147483647;
+    // return 0x400000000;
     if (length <= 0)
         return (u64)-1;
     
@@ -363,6 +362,7 @@ define_syscall(write, int fd, char *buffer, int size)
 
 define_syscall(lseek, int fd, i64 offset, int whence)
 {
+    printk("lseek: fd=%d, offset=%lld, whence=%d\n", fd, (long long)offset, whence);
     struct file *f = fd2file(fd);
     if (!f)
         return -1;
