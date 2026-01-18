@@ -286,9 +286,9 @@ void fork_test(void)
     printf("mmaped at %p\n", p1);
     if (p1 == MAP_FAILED)
         err("mmap (4)");
-    printf("fork_test: mmap file again\n");
+    // printf("fork_test: mmap file again\n");
         char *p2 = mmap(0, PGSIZE * 2, PROT_READ, MAP_SHARED, fd, 0);
-    printf("mmaped at %p\n", p2);
+    // printf("mmaped at %p\n", p2);
     if (p2 == MAP_FAILED)
         err("mmap (5)");
     printf("fork_test: close file\n");
