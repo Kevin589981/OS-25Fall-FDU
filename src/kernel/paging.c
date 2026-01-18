@@ -48,8 +48,7 @@ void init_sections(ListNode *section_head)
 }
 
 
-void free_sections(struct pgdir *pd)
-{
+void free_sections(struct pgdir *pd){
     if (pd == NULL)
         return;
     
@@ -89,8 +88,7 @@ void free_sections(struct pgdir *pd)
     release_spinlock(&pd->lock);
 }
 
-u64 sbrk(i64 size)
-{
+u64 sbrk(i64 size){
     /**
      * (Final) TODO BEGIN 
      * 
@@ -150,8 +148,7 @@ Section *lookup_section(struct pgdir *pd, u64 va)
     return NULL;
 }
 
-int pgfault_handler(u64 iss)
-{
+int pgfault_handler(u64 iss){
     Proc *p = thisproc();
     struct pgdir *pd = &p->pgdir;
     u64 fault_addr = arch_get_far();
@@ -339,8 +336,7 @@ int pgfault_handler(u64 iss)
     return 1;
 }
 
-void copy_sections(ListNode *from_head, ListNode *to_head)
-{
+void copy_sections(ListNode *from_head, ListNode *to_head){
     /* (Final) TODO BEGIN */
     _for_in_list(node, from_head)
     {
