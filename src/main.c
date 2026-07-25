@@ -6,21 +6,7 @@
 #include <kernel/printk.h>
 
 static volatile bool boot_secondary_cpus = false;
-static void check_bss_zero(void *start, void *end){
-    unsigned char *p   = (unsigned char *)start;
-    long long unsigned int len  = (unsigned char *)end - p;
-    long long unsigned int bad  = 0;
 
-    for (long long unsigned int i = 0; i < len; ++i) {
-        if (p[i] != 0) {
-            ++bad;
-        }
-    }
-    if (bad == 0)
-        printk("BSS check PASSED: %llu bytes are all zero.\n", len);
-    else
-        printk("BSS check FAILED: %llu non-zero bytes found.\n", bad);
-}
 
 void main() {
     if (cpuid() == 0) {
